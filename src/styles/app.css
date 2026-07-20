@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+@theme {
+  --color-sage-50: #f6f7f4;
+  --color-sage-100: #e3e7dd;
+  --color-sage-200: #c9d0be;
+  --color-sage-300: #a8b59a;
+  --color-sage-400: #8a9a79;
+  --color-sage-500: #6d7f5f;
+  --color-sage-600: #56644a;
+  --color-sage-700: #43503b;
+  --color-sage-800: #384231;
+  --color-sage-900: #30382b;
+
+  --color-cream-50: #fefdfb;
+  --color-cream-100: #fdf8f1;
+  --color-cream-200: #faefdd;
+  --color-cream-300: #f5e2c0;
+  --color-cream-400: #efcf99;
+  --color-cream-500: #e8b972;
+  --color-cream-600: #dea24c;
+  --color-cream-700: #c9882e;
+  --color-cream-800: #a76e2a;
+  --color-cream-900: #8a5b27;
+
+  --color-lavender-50: #f8f6fb;
+  --color-lavender-100: #f0ecf7;
+  --color-lavender-200: #e2d9f0;
+  --color-lavender-300: #ccbde4;
+  --color-lavender-400: #b099d4;
+  --color-lavender-500: #9575c2;
+  --color-lavender-600: #7e5cad;
+  --color-lavender-700: #6a4b95;
+  --color-lavender-800: #5a3f7c;
+  --color-lavender-900: #4b3666;
+}
+
+@layer base {
+  html,
+  body {
+    @apply bg-cream-50 text-gray-800 antialiased;
+  }
+}
+
+/* ── Utility animations ─────────────────────────────────────────────────── */
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+.animate-slide-up {
+  animation: slide-up 0.35s ease-out;
+}
+
+.animate-pulse-soft {
+  animation: pulse-soft 1.5s ease-in-out infinite;
+}
+
+/* ── Loading skeleton ────────────────────────────────────────────────────── */
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-cream-200) 25%,
+    var(--color-cream-100) 50%,
+    var(--color-cream-200) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 0.5rem;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
