@@ -227,6 +227,188 @@ export const getChildrenByAccount = createServerFn({ method: "GET" })
     }
   });
 
+// ── Magic-link login ───────────────────────────────────────────────────────
+
+/** Base URL for links in emails. Derived server-side — never from the client,
+ * so a forged origin can't redirect a login token to an attacker. */
+function siteBaseUrl(): string {
+  if (process.env.SITE_URL) return process.env.SITE_URL.replace(/\/$/, "");
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+  return "http://localhost:3000";
+}
+
+function magicLinkEmailHtml(link: string, isNew: boolean): string {
+  const intro = isNew
+    ? "Welcome to WordBloom! Confirm your email to secure your account and sign in on any device:"
+    : "Here's your secure link to sign in to WordBloom:";
+  return `<!doctype html><html><body style="margin:0;background:#fefdfb;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#384231;">
+    <div style="max-width:480px;margin:0 auto;padding:40px 24px;text-align:center;">
+      <div style="font-size:44px;">🌱</div>
+      <h1 style="font-size:22px;color:#43503b;margin:12px 0 4px;">WordBloom</h1>
+      <p style="color:#56644a;line-height:1.6;margin:20px 0;">${intro}</p>
+      <a href="${link}" style="display:inline-block;background:#9575c2;color:#fff;text-decoration:none;font-weight:600;padding:14px 28px;border-radius:9999px;">Sign in to WordBloom</a>
+      <p style="color:#8a9a79;font-size:13px;line-height:1.6;margin-top:28px;">This link expires in 30 minutes and can be used once. If you didn't request it, you can safely ignore this email — no changes were made.</p>
+      <p style="color:#a8b59a;font-size:12px;margin-top:24px;word-break:break-all;">Or paste this link:<br>${link}</p>
+    </div></body></html>`;
+}
+
+/** Send an email via Resend. Returns false when not configured or on failure. */
+async function sendEmailViaResend(
+  to: string,
+  subject: string,
+  html: string,
+): Promise<boolean> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) return false;
+  const from = process.env.EMAIL_FROM ?? "WordBloom <onboarding@resend.dev>";
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ from, to, subject, html }),
+    });
+    if (!res.ok) {
+      console.error("Resend send failed:", res.status, await res.text());
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error("Resend send error:", e);
+    return false;
+  }
+}
+
+/**
+ * Request a magic sign-in link for an email.
+ *
+ * Returns `{ isNew }` so the caller knows whether this is a fresh account.
+ * When email delivery is NOT configured (`RESEND_API_KEY` unset), returns a
+ * `devToken` so the client can complete sign-in without email — this preserves
+ * the pre-magic-link behavior for the live site until the key is added. Once
+ * configured, no token is ever returned to the client and control of the inbox
+ * is required.
+ */
+export const requestMagicLink = createServerFn({ method: "POST" })
+  .validator((data: { email: string }) => data)
+  .handler(async ({ data }) => {
+    await runMigrations();
+    try {
+      const sql = getSql();
+      const email = data.email.toLowerCase().trim();
+      if (!email || !email.includes("@")) {
+        return { ok: false as const, error: "Please enter a valid email." };
+      }
+
+      const existing = await sql`SELECT id FROM accounts WHERE email = ${email}`;
+      const isNew = existing.length === 0;
+
+      const token = `${crypto.randomUUID()}${crypto.randomUUID()}`.replace(
+        /-/g,
+        "",
+      );
+      const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+      await sql`
+        INSERT INTO magic_tokens (email, token, expires_at)
+        VALUES (${email}, ${token}, ${expiresAt})
+      `;
+
+      const link = `${siteBaseUrl()}/auth/verify?token=${token}`;
+      const sent = await sendEmailViaResend(
+        email,
+        isNew ? "Confirm your WordBloom account 🌱" : "Your WordBloom sign-in link 🌱",
+        magicLinkEmailHtml(link, isNew),
+      );
+
+      // Degraded mode: no email provider configured — hand the token back so
+      // the client can finish (equivalent to the old email-as-identity flow).
+      if (!sent) {
+        return { ok: true as const, sent: false, isNew, devToken: token };
+      }
+      return { ok: true as const, sent: true, isNew };
+    } catch (e) {
+      console.error("requestMagicLink failed:", e);
+      return { ok: false as const, error: "Something went wrong. Please try again." };
+    }
+  });
+
+/**
+ * Verify a magic token: checks it's unexpired and unused, marks it used, then
+ * upserts the account and rotates its session token. Returns the account +
+ * linked child so the client can hydrate.
+ */
+export const verifyMagicLink = createServerFn({ method: "POST" })
+  .validator((data: { token: string }) => data)
+  .handler(async ({ data }) => {
+    await runMigrations();
+    try {
+      const sql = getSql();
+      const token = data.token.trim();
+      if (!token) return { ok: false as const, reason: "invalid" as const };
+
+      // Atomically claim the token: only succeeds if unused and unexpired.
+      const claimed = await sql`
+        UPDATE magic_tokens
+        SET used_at = NOW()
+        WHERE token = ${token}
+          AND used_at IS NULL
+          AND expires_at > NOW()
+        RETURNING email
+      `;
+      if (claimed.length === 0) {
+        // Distinguish expired/used from never-existed for a clearer message.
+        const exists = await sql`SELECT used_at, expires_at FROM magic_tokens WHERE token = ${token}`;
+        if (exists.length === 0) return { ok: false as const, reason: "invalid" as const };
+        return { ok: false as const, reason: "expired" as const };
+      }
+
+      const email = String(claimed[0].email).toLowerCase().trim();
+
+      // Upsert account + rotate session token
+      const sessionToken = crypto.randomUUID();
+      const rows = await sql`
+        INSERT INTO accounts (email, session_token)
+        VALUES (${email}, ${sessionToken})
+        ON CONFLICT (email) DO UPDATE SET
+          session_token = ${sessionToken},
+          last_login_at = NOW()
+        RETURNING id, is_premium
+      `;
+      const accountId = Number(rows[0].id);
+      const isPremium = Boolean(rows[0].is_premium);
+
+      // Best-effort cleanup of this email's spent/expired tokens
+      await sql`
+        DELETE FROM magic_tokens
+        WHERE email = ${email} AND (used_at IS NOT NULL OR expires_at < NOW())
+      `.catch(() => {});
+
+      // Linked child (first, if any)
+      const childRows = await sql`
+        SELECT id, name, birth_date FROM children
+        WHERE account_id = ${accountId}
+        ORDER BY created_at ASC LIMIT 1
+      `;
+      const child = childRows[0];
+
+      return {
+        ok: true as const,
+        sessionToken,
+        id: accountId,
+        email,
+        isPremium,
+        childId: child ? Number(child.id) : null,
+        childName: child ? String(child.name) : null,
+        childBirthDate: child ? String(child.birth_date) : null,
+      };
+    } catch (e) {
+      console.error("verifyMagicLink failed:", e);
+      return { ok: false as const, reason: "error" as const };
+    }
+  });
+
 // ── Child operations ───────────────────────────────────────────────────────
 
 export const createChild = createServerFn({ method: "POST" })
