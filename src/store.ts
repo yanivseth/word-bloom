@@ -1,5 +1,6 @@
 import type { Child, ChildProfile, Phrase, WordClassification } from "./types";
 import { generatePhrases, classifyWord } from "./engine";
+import { ageInMonths } from "./utils";
 
 const CHILD_KEY = "wordbloom_child";
 const WORDS_KEY = "wordbloom_words";
@@ -261,15 +262,38 @@ export function getActiveChildId(): number | null {
   return isNaN(id) ? null : id;
 }
 
+// Per-child local word cache — keeps multi-child words separated offline
+// (the legacy single-child CHILD_KEY record can't distinguish children).
+function childWordsKey(childId: number): string {
+  return `wordbloom_words_${childId}`;
+}
+
+function getCachedChildWords(childId: number): string[] {
+  const raw = lsGet(childWordsKey(childId));
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw) as string[];
+  } catch {
+    return [];
+  }
+}
+
+function setCachedChildWords(childId: number, words: string[]): void {
+  lsSet(childWordsKey(childId), JSON.stringify(words));
+}
+
 /**
- * Load words for a specific child from the database.
+ * Load words for a specific child from the database, falling back to the
+ * per-child local cache when the DB is unreachable.
  */
 export async function getWordsForChild(childId: number): Promise<string[]> {
   try {
     const { getWords: dbGetWords } = await import("~/db/queries");
-    return await dbGetWords({ data: { childId } });
+    const words = await dbGetWords({ data: { childId } });
+    setCachedChildWords(childId, words);
+    return words;
   } catch {
-    return [];
+    return getCachedChildWords(childId);
   }
 }
 
@@ -297,22 +321,38 @@ export function getChild(): Child | null {
   }
 }
 
-export function addWord(word: string): void {
+export function addWord(
+  word: string,
+  source: "manual" | "suggestion" = "manual",
+): void {
   if (typeof window === "undefined") return;
-  const child = getChild();
-  if (!child) return;
   const trimmed = word.trim();
-  if (!trimmed || child.words.includes(trimmed)) return;
-  child.words.push(trimmed);
-  saveChild(child);
+  if (!trimmed) return;
+
+  const childId = getActiveChildId() ?? getChildId();
+
+  // Per-child cache (multi-child safe)
+  if (childId) {
+    const cached = getCachedChildWords(childId);
+    if (!cached.includes(trimmed)) {
+      setCachedChildWords(childId, [...cached, trimmed]);
+    }
+  }
+
+  // Legacy single-child record — only when it's the offline fallback store
+  // (no childId) so multi-child accounts don't mix words into one record.
+  if (!childId) {
+    const child = getChild();
+    if (!child || child.words.includes(trimmed)) return;
+    child.words.push(trimmed);
+    saveChild(child);
+    return;
+  }
 
   // Fire-and-forget: write to DB in the background
-  const childId = getActiveChildId() ?? getChildId();
-  if (childId) {
-    import("~/db/queries").then(({ addWord: dbAddWord }) => {
-      dbAddWord({ data: { childId, word: trimmed } }).catch(() => {});
-    });
-  }
+  import("~/db/queries").then(({ addWord: dbAddWord }) => {
+    dbAddWord({ data: { childId, word: trimmed, source } }).catch(() => {});
+  });
 }
 
 export function getWords(): string[] {
@@ -323,18 +363,26 @@ export function getWords(): string[] {
 
 export function deleteWord(word: string): void {
   if (typeof window === "undefined") return;
+
+  const childId = getActiveChildId() ?? getChildId();
+
+  if (childId) {
+    setCachedChildWords(
+      childId,
+      getCachedChildWords(childId).filter((w) => w !== word),
+    );
+    // Fire-and-forget: delete from DB in the background
+    import("~/db/queries").then(({ deleteWord: dbDeleteWord }) => {
+      dbDeleteWord({ data: { childId, word } }).catch(() => {});
+    });
+    return;
+  }
+
+  // Offline fallback record
   const child = getChild();
   if (!child) return;
   child.words = child.words.filter((w) => w !== word);
   saveChild(child);
-
-  // Fire-and-forget: delete from DB in the background
-  const childId = getActiveChildId() ?? getChildId();
-  if (childId) {
-    import("~/db/queries").then(({ deleteWord: dbDeleteWord }) => {
-      dbDeleteWord({ data: { childId, word } }).catch(() => {});
-    });
-  }
 }
 
 export function hasChildProfile(): boolean {
@@ -346,13 +394,7 @@ export function getAgeMonths(): number {
   if (typeof window === "undefined") return 18; // SSR default: ~18 months
   const child = getChild();
   if (!child?.birthDate) return 18;
-  const birth = new Date(child.birthDate);
-  const now = new Date();
-  const months =
-    (now.getFullYear() - birth.getFullYear()) * 12 +
-    (now.getMonth() - birth.getMonth());
-  // Clamp to realistic range
-  return Math.max(6, Math.min(48, months));
+  return ageInMonths(child.birthDate);
 }
 
 /** Pick up to `count` phrases using the phrase generation engine */

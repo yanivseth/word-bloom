@@ -25,6 +25,8 @@ export interface Phrase {
   context: string;
   basedOnWord?: string;
   newWord?: string;
+  /** The single loggable word for the "Said it!" button (defaults to newWord) */
+  targetWord?: string;
   tip?: string;
 }
 

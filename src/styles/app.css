@@ -77,6 +77,28 @@
   animation: pulse-soft 1.5s ease-in-out infinite;
 }
 
+/* ── "Said it!" celebration ─────────────────────────────────────────────── */
+
+@keyframes confetti-pop {
+  0% {
+    opacity: 1;
+    transform: translate(0, 0) scale(0.6) rotate(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--confetti-x, 0), var(--confetti-y, -120px))
+      scale(1.2) rotate(var(--confetti-r, 180deg));
+  }
+}
+
+.confetti-piece {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  pointer-events: none;
+  animation: confetti-pop 0.9s ease-out forwards;
+}
+
 /* ── Loading skeleton ────────────────────────────────────────────────────── */
 
 .skeleton {

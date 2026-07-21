@@ -7,7 +7,6 @@ import {
   hasChildProfile,
   deleteWord,
   isPremium,
-  getChildId,
   getAccount,
   getSession,
   verifyPremiumFromDb,
@@ -19,6 +18,14 @@ import {
   redeemPromoCode,
 } from "~/store";
 import { generatePhrases } from "~/engine";
+import { ageInMonths, todayKey } from "~/utils";
+import {
+  getPushState,
+  registerServiceWorker,
+  subscribeToPush,
+  unsubscribeFromPush,
+  type PushState,
+} from "~/push";
 import { WordBadge } from "~/components/WordBadge";
 import { PhraseCard } from "~/components/PhraseCard";
 import { PremiumBanner } from "~/components/PremiumBanner";
@@ -39,21 +46,81 @@ function getGreeting(): string {
   return "Good evening";
 }
 
-/** Compute age in months from a birth date string (YYYY-MM-DD) */
-function computeAgeMonths(birthDate: string): number {
-  const birth = new Date(birthDate);
-  const now = new Date();
-  const months =
-    (now.getFullYear() - birth.getFullYear()) * 12 +
-    (now.getMonth() - birth.getMonth());
-  return Math.max(6, Math.min(48, months));
+// ── Daily edition helpers ────────────────────────────────────────────────────
+// "Today's phrases" is a stable daily edition: the same child + day + edition
+// number always produces the same phrases. Refreshing bumps the edition (and
+// persists it, so the reshuffled set is what you see all day). Free users get
+// one reshuffle per day; premium refreshes freely and can pick a context.
+
+const FREE_MAX_EDITION = 1;
+
+function editionKey(childKey: string): string {
+  return `wordbloom_edition_${childKey}_${todayKey()}`;
+}
+
+function getStoredEdition(childKey: string): number {
+  if (typeof window === "undefined") return 0;
+  try {
+    const raw = localStorage.getItem(editionKey(childKey));
+    const n = raw ? parseInt(raw, 10) : 0;
+    return isNaN(n) ? 0 : n;
+  } catch {
+    return 0;
+  }
+}
+
+function storeEdition(childKey: string, edition: number): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(editionKey(childKey), String(edition));
+  } catch {
+    // ignore
+  }
+}
+
+/** Gentle time-of-day default so phrases fit the moment without any input */
+function timeOfDayContext(): string | undefined {
+  const hour = new Date().getHours();
+  if (hour >= 6 && hour < 10) return "mealtime";
+  if (hour >= 12 && hour < 14) return "mealtime";
+  if (hour >= 18 && hour < 20) return "bathtime";
+  if (hour >= 20 || hour < 6) return "bedtime";
+  return undefined;
+}
+
+const CONTEXT_CHIPS: { label: string; value: string | undefined }[] = [
+  { label: "✨ Auto", value: undefined },
+  { label: "🧸 Play", value: "playtime" },
+  { label: "🍌 Meals", value: "mealtime" },
+  { label: "🛁 Bath", value: "bathtime" },
+  { label: "🌙 Bed", value: "bedtime" },
+  { label: "🌳 Outside", value: "outside" },
+];
+
+/** Consecutive-day streak ending today or yesterday (UTC day keys) */
+function computeStreak(sessionDays: string[]): number {
+  if (sessionDays.length === 0) return 0;
+  const days = [...new Set(sessionDays)].sort().reverse();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  const yesterdayUtc = new Date(Date.now() - dayMs).toISOString().slice(0, 10);
+  if (days[0] !== todayUtc && days[0] !== yesterdayUtc) return 0;
+
+  let streak = 1;
+  for (let i = 1; i < days.length; i++) {
+    const prev = new Date(days[i - 1] + "T00:00:00Z").getTime();
+    const cur = new Date(days[i] + "T00:00:00Z").getTime();
+    if (prev - cur === dayMs) streak++;
+    else break;
+  }
+  return streak;
 }
 
 function Dashboard() {
   const navigate = useNavigate();
 
   // Redirect to setup if no profile
-  if (typeof window !== "undefined" && !hasChildProfile()) {
+  if (typeof window !== "undefined" && !hasChildProfile() && !getSession()) {
     navigate({ to: "/setup", replace: true });
     return null;
   }
@@ -91,6 +158,44 @@ function PhraseCardSkeleton() {
   );
 }
 
+const CONFETTI_EMOJI = ["🎉", "🌟", "🌱", "✨", "💚", "🎈"];
+
+function ConfettiBurst() {
+  const pieces = useMemo(
+    () =>
+      Array.from({ length: 14 }, (_, i) => ({
+        emoji: CONFETTI_EMOJI[i % CONFETTI_EMOJI.length],
+        x: `${Math.round((Math.random() - 0.5) * 240)}px`,
+        y: `${Math.round(-40 - Math.random() * 160)}px`,
+        r: `${Math.round((Math.random() - 0.5) * 360)}deg`,
+        delay: `${Math.round(Math.random() * 200)}ms`,
+        size: 16 + Math.round(Math.random() * 12),
+      })),
+    [],
+  );
+  return (
+    <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center">
+      <div className="relative">
+        {pieces.map((p, i) => (
+          <span
+            key={i}
+            className="confetti-piece"
+            style={{
+              fontSize: p.size,
+              animationDelay: p.delay,
+              ["--confetti-x" as string]: p.x,
+              ["--confetti-y" as string]: p.y,
+              ["--confetti-r" as string]: p.r,
+            }}
+          >
+            {p.emoji}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DashboardContent() {
   const navigate = useNavigate();
 
@@ -98,6 +203,7 @@ function DashboardContent() {
   const [children, setChildren] = useState<ChildProfile[]>([]);
   const [activeChildId, setActiveChildIdState] = useState<number | null>(null);
   const [words, setWords] = useState<string[]>([]);
+  const [wordDates, setWordDates] = useState<Map<string, string>>(new Map());
   const [phrases, setPhrases] = useState<Phrase[]>([]);
   const [premium, setPremiumState] = useState(
     () => typeof window !== "undefined" && isPremium(),
@@ -106,6 +212,15 @@ function DashboardContent() {
   const [accountId, setAccountId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [upgradedBanner, setUpgradedBanner] = useState(false);
+
+  // ── Habit-loop state ──────────────────────────────────────────────────────
+  const [edition, setEdition] = useState(0);
+  const [contextChoice, setContextChoice] = useState<string | undefined>(
+    undefined,
+  );
+  const [streak, setStreak] = useState(0);
+  const [celebrating, setCelebrating] = useState<string | null>(null);
+  const [pushState, setPushState] = useState<PushState>("unsupported");
 
   // ── Promo code state ──────────────────────────────────────────────────────
   const [promoCodeInput, setPromoCodeInput] = useState("");
@@ -119,11 +234,42 @@ function DashboardContent() {
   // ── Form state ────────────────────────────────────────────────────────────
   const [newWord, setNewWord] = useState("");
   const [adding, setAdding] = useState(false);
-  const [refreshCount, setRefreshCount] = useState(0);
 
   const activeChild = useMemo(
     () => children.find((c) => c.id === activeChildId) ?? null,
     [children, activeChildId],
+  );
+
+  const childSeedKey = activeChildId !== null ? String(activeChildId) : "local";
+
+  const ageMonths = useMemo(
+    () =>
+      activeChild
+        ? ageInMonths(activeChild.birthDate)
+        : ageInMonths(getChild()?.birthDate ?? "2024-01-01"),
+    [activeChild],
+  );
+
+  const buildPhrases = useCallback(
+    (
+      wordList: string[],
+      age: number,
+      isPrem: boolean,
+      seedChildKey: string,
+      editionNum: number,
+      context: string | undefined,
+    ): Phrase[] => {
+      const soft = context === undefined;
+      const hint = context ?? timeOfDayContext();
+      const seed = `${seedChildKey}:${todayKey()}:${editionNum}:${hint ?? "any"}`;
+      return generatePhrases(wordList, age, {
+        count: isPrem ? 3 : 1,
+        contextHint: hint,
+        contextIsSoft: soft,
+        seed,
+      });
+    },
+    [],
   );
 
   // ── Initial load ──────────────────────────────────────────────────────────
@@ -138,6 +284,10 @@ function DashboardContent() {
         window.history.replaceState({}, "", url.toString());
       }
     }
+    // Register the service worker early (PWA install + push readiness)
+    registerServiceWorker().then(() => {
+      getPushState().then(setPushState);
+    });
   }, []);
 
   useEffect(() => {
@@ -156,11 +306,19 @@ function DashboardContent() {
           setAccountEmail(account.email);
           setAccountId(account.id);
 
-          // Fire-and-forget: log session
-          import("~/db/queries")
-            .then(({ logSession }) => {
-              logSession({ data: { accountId: account.id } }).catch(() => {});
-            });
+          // Fire-and-forget: log session, then compute streak (today's
+          // session included)
+          import("~/db/queries").then(({ logSession, getSessionDays }) => {
+            logSession({ data: { accountId: account.id } })
+              .catch(() => {})
+              .finally(() => {
+                getSessionDays({ data: { accountId: account.id } })
+                  .then((days) => {
+                    if (!cancelled) setStreak(computeStreak(days));
+                  })
+                  .catch(() => {});
+              });
+          });
 
           // Verify premium from DB
           const dbPremium = await verifyPremiumFromDb();
@@ -182,40 +340,63 @@ function DashboardContent() {
             const active =
               storedActiveId && allChildren.some((c) => c.id === storedActiveId)
                 ? storedActiveId
-                : allChildren[0]?.id ?? null;
+                : (allChildren[0]?.id ?? null);
 
             if (active !== null) {
               setActiveChildIdState(active);
               setActiveChildId(active);
 
-              // Load words for active child
-              const childWords = await getWordsForChild(active);
+              // Load words (with dates for the weekly recap)
+              let childWords: string[] = [];
+              const dates = new Map<string, string>();
+              try {
+                const { getWordsWithDates } = await import("~/db/queries");
+                const entries = await getWordsWithDates({
+                  data: { childId: active },
+                });
+                childWords = entries.map((e) => e.word);
+                for (const e of entries) dates.set(e.word, e.dateAdded);
+              } catch {
+                childWords = await getWordsForChild(active);
+              }
+
               if (!cancelled) {
                 setWords(childWords);
-                const currentPremium = dbPremium;
-                const freshPhrases = generatePhrases(
+                setWordDates(dates);
+
+                const childKey = String(active);
+                const storedEdition = getStoredEdition(childKey);
+                setEdition(storedEdition);
+
+                const childAge = ageInMonths(
+                  allChildren.find((c) => c.id === active)?.birthDate ??
+                    "2024-01-01",
+                );
+                const freshPhrases = buildPhrases(
                   childWords,
-                  computeAgeMonths(allChildren.find((c) => c.id === active)?.birthDate ?? "2024-01-01"),
-                  currentPremium ? 3 : 1,
+                  childAge,
+                  dbPremium,
+                  childKey,
+                  storedEdition,
+                  undefined,
                 );
                 setPhrases(freshPhrases);
 
                 // Fire-and-forget: log phrase views
                 const aid = account.id;
-                import("~/db/queries")
-                  .then(({ logPhraseViews }) => {
-                    logPhraseViews({
-                      data: {
-                        views: freshPhrases.map((p) => ({
-                          accountId: aid,
-                          childId: active,
-                          phraseText: p.text,
-                          context: p.context,
-                          wasRefreshed: false,
-                        })),
-                      },
-                    }).catch(() => {});
-                  });
+                import("~/db/queries").then(({ logPhraseViews }) => {
+                  logPhraseViews({
+                    data: {
+                      views: freshPhrases.map((p) => ({
+                        accountId: aid,
+                        childId: active,
+                        phraseText: p.text,
+                        context: p.context,
+                        wasRefreshed: false,
+                      })),
+                    },
+                  }).catch(() => {});
+                });
               }
             }
           }
@@ -226,10 +407,15 @@ function DashboardContent() {
         if (!cancelled) {
           setWords(localWords);
           const currentPremium = isPremium();
-          const freshPhrases = generatePhrases(
+          const storedEdition = getStoredEdition("local");
+          setEdition(storedEdition);
+          const freshPhrases = buildPhrases(
             localWords,
-            computeAgeMonths(getChild()?.birthDate ?? "2024-01-01"),
-            currentPremium ? 3 : 1,
+            ageInMonths(getChild()?.birthDate ?? "2024-01-01"),
+            currentPremium,
+            "local",
+            storedEdition,
+            undefined,
           );
           setPhrases(freshPhrases);
         }
@@ -253,44 +439,57 @@ function DashboardContent() {
       setPhrases([]);
       setIsLoading(true);
 
-      const childWords = await getWordsForChild(childId);
+      let childWords: string[] = [];
+      const dates = new Map<string, string>();
+      try {
+        const { getWordsWithDates } = await import("~/db/queries");
+        const entries = await getWordsWithDates({ data: { childId } });
+        childWords = entries.map((e) => e.word);
+        for (const e of entries) dates.set(e.word, e.dateAdded);
+      } catch {
+        childWords = await getWordsForChild(childId);
+      }
+
       const child = children.find((c) => c.id === childId);
-      const ageMonths = child ? computeAgeMonths(child.birthDate) : 18;
-      const freshPhrases = generatePhrases(childWords, ageMonths, premium ? 3 : 1);
+      const age = child ? ageInMonths(child.birthDate) : 18;
+      const childKey = String(childId);
+      const storedEdition = getStoredEdition(childKey);
+      const freshPhrases = buildPhrases(
+        childWords,
+        age,
+        premium,
+        childKey,
+        storedEdition,
+        contextChoice,
+      );
 
       setWords(childWords);
+      setWordDates(dates);
+      setEdition(storedEdition);
       setPhrases(freshPhrases);
       setIsLoading(false);
 
       // Fire-and-forget: log phrase views
       if (accountId) {
-        import("~/db/queries")
-          .then(({ logPhraseViews }) => {
-            logPhraseViews({
-              data: {
-                views: freshPhrases.map((p) => ({
-                  accountId,
-                  childId,
-                  phraseText: p.text,
-                  context: p.context,
-                  wasRefreshed: false,
-                })),
-              },
-            }).catch(() => {});
-          });
+        import("~/db/queries").then(({ logPhraseViews }) => {
+          logPhraseViews({
+            data: {
+              views: freshPhrases.map((p) => ({
+                accountId,
+                childId,
+                phraseText: p.text,
+                context: p.context,
+                wasRefreshed: false,
+              })),
+            },
+          }).catch(() => {});
+        });
       }
     },
-    [children, premium, accountId],
+    [children, premium, accountId, contextChoice, buildPhrases],
   );
 
   // ── Derived values ────────────────────────────────────────────────────────
-  const phraseCount = premium ? 3 : 1;
-
-  const ageMonths = useMemo(
-    () => (activeChild ? computeAgeMonths(activeChild.birthDate) : 18),
-    [activeChild],
-  );
-
   const greeting = useMemo(() => getGreeting(), []);
 
   const ageLabel = useMemo(() => {
@@ -319,6 +518,56 @@ function DashboardContent() {
     [words],
   );
 
+  // Weekly recap: words added in the last 7 days
+  const wordsThisWeek = useMemo(() => {
+    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    let count = 0;
+    for (const [, dateStr] of wordDates) {
+      const t = new Date(dateStr).getTime();
+      if (!isNaN(t) && t >= weekAgo) count++;
+    }
+    return count;
+  }, [wordDates]);
+
+  const refreshesLeft = premium ? Infinity : FREE_MAX_EDITION - edition;
+
+  // ── Regenerate helper (shared by refresh / context / said-it) ─────────────
+  const regenerate = useCallback(
+    (
+      wordList: string[],
+      editionNum: number,
+      context: string | undefined,
+      wasRefreshed: boolean,
+    ) => {
+      const freshPhrases = buildPhrases(
+        wordList,
+        ageMonths,
+        premium,
+        childSeedKey,
+        editionNum,
+        context,
+      );
+      setPhrases(freshPhrases);
+
+      if (accountId && activeChildId) {
+        import("~/db/queries").then(({ logPhraseViews }) => {
+          logPhraseViews({
+            data: {
+              views: freshPhrases.map((p) => ({
+                accountId,
+                childId: activeChildId,
+                phraseText: p.text,
+                context: p.context,
+                wasRefreshed,
+              })),
+            },
+          }).catch(() => {});
+        });
+      }
+    },
+    [buildPhrases, ageMonths, premium, childSeedKey, accountId, activeChildId],
+  );
+
   // ── Handlers ──────────────────────────────────────────────────────────────
   const handleAddWord = useCallback(
     (e: React.FormEvent) => {
@@ -332,14 +581,16 @@ function DashboardContent() {
       addWord(trimmed);
       const updatedWords = [...words, trimmed];
       setWords(updatedWords);
+      setWordDates((prev) =>
+        new Map(prev).set(trimmed, new Date().toISOString()),
+      );
       setNewWord("");
 
-      const freshPhrases = generatePhrases(updatedWords, ageMonths, phraseCount);
-      setPhrases(freshPhrases);
+      regenerate(updatedWords, edition, contextChoice, false);
       setAdding(true);
       setTimeout(() => setAdding(false), 1200);
     },
-    [newWord, words, ageMonths, phraseCount],
+    [newWord, words, edition, contextChoice, regenerate],
   );
 
   const handleDeleteWord = useCallback(
@@ -347,45 +598,64 @@ function DashboardContent() {
       const updatedWords = words.filter((w) => w !== word);
       setWords(updatedWords);
       deleteWord(word);
-
-      const freshPhrases = generatePhrases(updatedWords, ageMonths, phraseCount);
-      setPhrases(freshPhrases);
+      regenerate(updatedWords, edition, contextChoice, false);
     },
-    [words, ageMonths, phraseCount],
+    [words, edition, contextChoice, regenerate],
   );
 
   const handleRefreshPhrases = useCallback(() => {
-    setRefreshCount((c) => c + 1);
-    const hints = [
-      undefined,
-      "playtime",
-      "mealtime",
-      "bathtime",
-      "bedtime",
-      "outside",
-    ];
-    const hint = hints[refreshCount % hints.length];
-    const freshPhrases = generatePhrases(words, ageMonths, phraseCount, hint);
-    setPhrases(freshPhrases);
+    if (!premium && edition >= FREE_MAX_EDITION) return;
+    const next = edition + 1;
+    setEdition(next);
+    storeEdition(childSeedKey, next);
+    regenerate(words, next, contextChoice, true);
+  }, [premium, edition, childSeedKey, words, contextChoice, regenerate]);
 
-    // Fire-and-forget: log refreshed phrase views
-    if (accountId && activeChildId) {
-      import("~/db/queries")
-        .then(({ logPhraseViews }) => {
-          logPhraseViews({
-            data: {
-              views: freshPhrases.map((p) => ({
-                accountId,
-                childId: activeChildId,
-                phraseText: p.text,
-                context: p.context,
-                wasRefreshed: true,
-              })),
-            },
-          }).catch(() => {});
-        });
+  const handlePickContext = useCallback(
+    (context: string | undefined) => {
+      setContextChoice(context);
+      regenerate(words, edition, context, true);
+    },
+    [words, edition, regenerate],
+  );
+
+  // The core loop-closer: the child actually said the suggested word.
+  const handleSaidIt = useCallback(
+    (word: string) => {
+      setCelebrating(word);
+      setTimeout(() => setCelebrating(null), 1500);
+
+      const trimmed = word.trim();
+      if (!trimmed || words.includes(trimmed)) return;
+
+      addWord(trimmed, "suggestion");
+      const updatedWords = [...words, trimmed];
+      setWords(updatedWords);
+      setWordDates((prev) =>
+        new Map(prev).set(trimmed, new Date().toISOString()),
+      );
+      // Regenerate so the parent immediately sees phrases building on the
+      // word their child just said — the ladder visibly extends.
+      regenerate(updatedWords, edition, contextChoice, false);
+    },
+    [words, edition, contextChoice, regenerate],
+  );
+
+  // ── Push notification toggle ──────────────────────────────────────────────
+  const [pushBusy, setPushBusy] = useState(false);
+  const handleTogglePush = useCallback(async () => {
+    if (pushBusy || !accountId) return;
+    setPushBusy(true);
+    try {
+      if (pushState === "subscribed") {
+        setPushState(await unsubscribeFromPush());
+      } else {
+        setPushState(await subscribeToPush(accountId));
+      }
+    } finally {
+      setPushBusy(false);
     }
-  }, [words, ageMonths, phraseCount, refreshCount, accountId, activeChildId]);
+  }, [pushBusy, pushState, accountId]);
 
   // ── Promo code handler ────────────────────────────────────────────────────
   const handleRedeemPromo = useCallback(
@@ -397,7 +667,6 @@ function DashboardContent() {
       setPromoLoading(true);
       setPromoMessage(null);
 
-      // Use the account email if available, otherwise fall back to localStorage
       const email = accountEmail;
       if (!email) {
         setPromoMessage({
@@ -415,7 +684,10 @@ function DashboardContent() {
           setPromoRedeemed(true);
           setPromoMessage({ type: "success", text: result.message });
           // Refresh phrases with premium count
-          const freshPhrases = generatePhrases(words, ageMonths, 3);
+          const freshPhrases = generatePhrases(words, ageMonths, {
+            count: 3,
+            seed: `${childSeedKey}:${todayKey()}:${edition}:any`,
+          });
           setPhrases(freshPhrases);
         } else {
           setPromoMessage({ type: "error", text: result.message });
@@ -429,22 +701,34 @@ function DashboardContent() {
         setPromoLoading(false);
       }
     },
-    [promoCodeInput, promoLoading, promoRedeemed, accountEmail, words, ageMonths],
+    [
+      promoCodeInput,
+      promoLoading,
+      promoRedeemed,
+      accountEmail,
+      words,
+      ageMonths,
+      childSeedKey,
+      edition,
+    ],
   );
 
   // ── Show multiple children? ───────────────────────────────────────────────
   const showSwitcher = children.length > 1;
 
   // ── Edit profile link ─────────────────────────────────────────────────────
-  const editLink = activeChildId
-    ? `/setup?edit=${activeChildId}`
-    : "/setup";
+  const editLink = activeChildId ? `/setup?edit=${activeChildId}` : "/setup";
 
   // ── Child name for display ────────────────────────────────────────────────
   const displayName = activeChild?.name ?? getChild()?.name ?? "Child";
 
+  const showPushButton =
+    accountId !== null && pushState !== "unsupported" && pushState !== "denied";
+
   return (
     <main className="flex flex-1 flex-col bg-cream-50">
+      {celebrating && <ConfettiBurst />}
+
       {/* Header */}
       <header className="sticky top-0 z-10 border-b border-cream-200 bg-cream-50/90 px-5 py-4 backdrop-blur-sm">
         <div className="mx-auto flex max-w-md items-center justify-between">
@@ -458,6 +742,11 @@ function DashboardContent() {
             <p className="text-xs text-sage-500">
               {ageLabel} &middot; {words.length} word
               {words.length === 1 ? "" : "s"}
+              {streak > 1 && (
+                <span className="ml-1 font-semibold text-cream-700">
+                  &middot; 🔥 {streak}-day streak
+                </span>
+              )}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -492,12 +781,20 @@ function DashboardContent() {
               </Link>
             )}
 
+            {/* Progress */}
+            <Link
+              to="/progress"
+              className="rounded-full bg-sage-100 px-3 py-1.5 text-xs font-medium text-sage-700 transition-colors hover:bg-sage-200 min-h-[44px] flex items-center"
+            >
+              📈 Progress
+            </Link>
+
             {/* Edit Profile */}
             <Link
               to={editLink}
               className="rounded-full bg-cream-200 px-3 py-1.5 text-xs font-medium text-sage-700 transition-colors hover:bg-cream-300 min-h-[44px] flex items-center"
             >
-              Edit Profile
+              Edit
             </Link>
           </div>
         </div>
@@ -513,6 +810,26 @@ function DashboardContent() {
           </div>
         )}
 
+        {/* Celebration banner */}
+        {celebrating && (
+          <div className="mb-6 rounded-xl bg-sage-100 border border-sage-300 px-5 py-4 text-center animate-fade-in">
+            <p className="font-semibold text-sage-800">
+              🎉 {displayName} said &ldquo;{celebrating}&rdquo;! Added to the
+              word garden.
+            </p>
+          </div>
+        )}
+
+        {/* Weekly recap */}
+        {!isLoading && wordsThisWeek > 0 && (
+          <div className="mb-6 rounded-xl border border-sage-200 bg-sage-50 px-5 py-3 text-center animate-fade-in">
+            <p className="text-sm font-medium text-sage-700">
+              🌱 {wordsThisWeek} new word{wordsThisWeek === 1 ? "" : "s"} this
+              week — {displayName} is blooming!
+            </p>
+          </div>
+        )}
+
         {/* Premium Banner for free users */}
         {!premium && (
           <div className="mb-6 transition-all duration-300">
@@ -523,7 +840,10 @@ function DashboardContent() {
         {/* Promo Code — only for free users, hidden after successful redemption */}
         {!premium && !promoRedeemed && accountEmail && (
           <div className="mb-6 animate-fade-in">
-            <form onSubmit={handleRedeemPromo} className="rounded-xl border border-dashed border-lavender-200 bg-white px-5 py-4">
+            <form
+              onSubmit={handleRedeemPromo}
+              className="rounded-xl border border-dashed border-lavender-200 bg-white px-5 py-4"
+            >
               <p className="text-sm font-medium text-sage-700 mb-2">
                 🎟️ Have a promo code?
               </p>
@@ -577,15 +897,38 @@ function DashboardContent() {
         <section className="mb-8">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="text-lg font-semibold text-sage-700">
-              🌿 Today&rsquo;s Phrase{phrases.length > 1 ? "s" : ""}
+              🌿 Today&rsquo;s Phrase{premium ? "s" : ""}
             </h2>
-            <button
-              onClick={handleRefreshPhrases}
-              className="rounded-full px-3 py-1 text-xs font-medium text-lavender-600 transition-colors hover:bg-lavender-50 hover:text-lavender-800 min-h-[44px] flex items-center"
-            >
-              ↻ Refresh
-            </button>
+            {(premium || refreshesLeft > 0) && (
+              <button
+                onClick={handleRefreshPhrases}
+                className="rounded-full px-3 py-1 text-xs font-medium text-lavender-600 transition-colors hover:bg-lavender-50 hover:text-lavender-800 min-h-[44px] flex items-center"
+              >
+                ↻ Refresh
+                {!premium && ` (${refreshesLeft} left today)`}
+              </button>
+            )}
           </div>
+
+          {/* Context picker — premium can ask for phrases for this moment */}
+          {premium && !isLoading && (
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {CONTEXT_CHIPS.map((chip) => (
+                <button
+                  key={chip.label}
+                  onClick={() => handlePickContext(chip.value)}
+                  className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors min-h-[36px] ${
+                    contextChoice === chip.value
+                      ? "bg-sage-500 text-white"
+                      : "bg-cream-200 text-sage-700 hover:bg-cream-300"
+                  }`}
+                >
+                  {chip.label}
+                </button>
+              ))}
+            </div>
+          )}
+
           <div className="space-y-3">
             {isLoading ? (
               <>
@@ -594,17 +937,32 @@ function DashboardContent() {
                 {premium && <PhraseCardSkeleton />}
               </>
             ) : (
-              phrases.map((phrase) => (
-                <PhraseCard key={phrase.id} phrase={phrase} />
-              ))
+              phrases.map((phrase) => {
+                const target = phrase.targetWord ?? phrase.newWord;
+                const canSayIt = target && !words.includes(target);
+                return (
+                  <PhraseCard
+                    key={phrase.id}
+                    phrase={phrase}
+                    onSaidIt={canSayIt ? handleSaidIt : undefined}
+                  />
+                );
+              })
             )}
           </div>
+
+          {!isLoading && (
+            <p className="mt-3 text-center text-xs text-gray-400">
+              🌅 Fresh phrases tomorrow — same time, same place.
+            </p>
+          )}
 
           {/* Free tier upgrade nudge */}
           {!premium && !isLoading && (
             <div className="mt-4 rounded-xl border border-dashed border-lavender-200 bg-lavender-50/50 p-4 text-center animate-fade-in">
               <p className="text-sm font-medium text-lavender-700">
-                ✨ Want more personalized phrases?
+                ✨ Want 3 phrases a day, bath-time &amp; bedtime phrase packs,
+                and progress insights?
               </p>
               <Link
                 to="/pricing"
@@ -615,6 +973,25 @@ function DashboardContent() {
             </div>
           )}
         </section>
+
+        {/* Daily reminder */}
+        {showPushButton && (
+          <section className="mb-8">
+            <button
+              onClick={handleTogglePush}
+              disabled={pushBusy}
+              className={`w-full rounded-xl border px-5 py-3 text-sm font-medium transition-colors min-h-[44px] ${
+                pushState === "subscribed"
+                  ? "border-sage-300 bg-sage-50 text-sage-700 hover:bg-sage-100"
+                  : "border-lavender-200 bg-white text-lavender-700 hover:bg-lavender-50"
+              } disabled:opacity-50`}
+            >
+              {pushState === "subscribed"
+                ? "🔔 Daily reminder on — tap to turn off"
+                : "🔕 Get a daily reminder when fresh phrases are ready"}
+            </button>
+          </section>
+        )}
 
         {/* My Child's Words */}
         <section className="mb-8">
@@ -655,8 +1032,8 @@ function DashboardContent() {
               {unknownWords.length > 3
                 ? `, and ${unknownWords.length - 3} more`
                 : ""}
-              ) are logged but don&rsquo;t yet power suggestions &mdash; we&rsquo;ll
-              use them as your child grows.
+              ) are logged but don&rsquo;t yet power suggestions &mdash;
+              we&rsquo;ll use them as your child grows.
             </div>
           )}
         </section>

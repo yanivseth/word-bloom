@@ -298,16 +298,18 @@ export const updateChild = createServerFn({ method: "POST" })
 
 export const addWord = createServerFn({ method: "POST" })
   .validator(
-    (data: { childId: number; word: string; type?: string }) => data,
+    (data: { childId: number; word: string; type?: string; source?: string }) =>
+      data,
   )
   .handler(async ({ data }) => {
     await runMigrations();
     try {
       const sql = getSql();
       const wordType = data.type ?? "word";
+      const source = data.source === "suggestion" ? "suggestion" : "manual";
       await sql`
-        INSERT INTO words (child_id, word, type)
-        VALUES (${data.childId}, ${data.word}, ${wordType})
+        INSERT INTO words (child_id, word, type, source)
+        VALUES (${data.childId}, ${data.word}, ${wordType}, ${source})
       `;
     } catch (e) {
       console.error("addWord failed:", e);
@@ -328,6 +330,28 @@ export const getWords = createServerFn({ method: "GET" })
       return rows.map((r) => String(r.word)) as string[];
     } catch (e) {
       console.error("getWords failed:", e);
+      return [];
+    }
+  });
+
+export const getWordsWithDates = createServerFn({ method: "GET" })
+  .validator((data: { childId: number }) => data)
+  .handler(async ({ data }) => {
+    await runMigrations();
+    try {
+      const sql = getSql();
+      const rows = await sql`
+        SELECT word, date_added, source FROM words
+        WHERE child_id = ${data.childId}
+        ORDER BY date_added ASC
+      `;
+      return rows.map((r) => ({
+        word: String(r.word),
+        dateAdded: String(r.date_added),
+        source: String(r.source ?? "manual"),
+      }));
+    } catch (e) {
+      console.error("getWordsWithDates failed:", e);
       return [];
     }
   });
@@ -363,6 +387,81 @@ export const logSession = createServerFn({ method: "POST" })
       console.error("logSession failed:", e);
     }
   });
+
+/**
+ * Distinct local-date day keys (YYYY-MM-DD, UTC) this account visited the
+ * dashboard, newest first. Used to compute the parent's "bloom streak".
+ */
+export const getSessionDays = createServerFn({ method: "GET" })
+  .validator((data: { accountId: number }) => data)
+  .handler(async ({ data }) => {
+    await runMigrations();
+    try {
+      const sql = getSql();
+      const rows = await sql`
+        SELECT DISTINCT TO_CHAR(started_at, 'YYYY-MM-DD') AS day
+        FROM sessions
+        WHERE account_id = ${data.accountId}
+        ORDER BY day DESC
+        LIMIT 90
+      `;
+      return rows.map((r) => String(r.day)) as string[];
+    } catch (e) {
+      console.error("getSessionDays failed:", e);
+      return [];
+    }
+  });
+
+// ── Push subscription operations ──────────────────────────────────────────
+
+export const savePushSubscription = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      accountId: number;
+      endpoint: string;
+      p256dh: string;
+      auth: string;
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    await runMigrations();
+    try {
+      const sql = getSql();
+      await sql`
+        INSERT INTO push_subscriptions (account_id, endpoint, p256dh, auth)
+        VALUES (${data.accountId}, ${data.endpoint}, ${data.p256dh}, ${data.auth})
+        ON CONFLICT (endpoint) DO UPDATE SET
+          account_id = ${data.accountId},
+          p256dh = ${data.p256dh},
+          auth = ${data.auth}
+      `;
+      return { success: true };
+    } catch (e) {
+      console.error("savePushSubscription failed:", e);
+      return { success: false };
+    }
+  });
+
+export const deletePushSubscription = createServerFn({ method: "POST" })
+  .validator((data: { endpoint: string }) => data)
+  .handler(async ({ data }) => {
+    await runMigrations();
+    try {
+      const sql = getSql();
+      await sql`
+        DELETE FROM push_subscriptions WHERE endpoint = ${data.endpoint}
+      `;
+    } catch (e) {
+      console.error("deletePushSubscription failed:", e);
+    }
+  });
+
+/** The VAPID public key the client needs to subscribe to push (or null). */
+export const getVapidPublicKey = createServerFn({ method: "GET" }).handler(
+  async () => {
+    return process.env.VAPID_PUBLIC_KEY ?? null;
+  },
+);
 
 // ── Promo code operations ──────────────────────────────────────────────────
 

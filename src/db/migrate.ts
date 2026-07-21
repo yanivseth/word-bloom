@@ -48,6 +48,11 @@ export async function runMigrations(): Promise<void> {
     // Add account_id to existing children table if it was created before this migration
     await sql`ALTER TABLE children ADD COLUMN IF NOT EXISTS account_id INTEGER REFERENCES accounts(id)`;
 
+    // Where a word came from: 'manual' (parent typed it) or 'suggestion'
+    // (logged via the "Said it!" button on a phrase card) — our phrase
+    // effectiveness signal.
+    await sql`ALTER TABLE words ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual'`;
+
     await sql`CREATE TABLE IF NOT EXISTS sessions (
       id SERIAL PRIMARY KEY,
       account_id INTEGER REFERENCES accounts(id),
@@ -72,6 +77,17 @@ export async function runMigrations(): Promise<void> {
       is_active BOOLEAN DEFAULT true,
       created_at TIMESTAMPTZ DEFAULT now()
     )`;
+
+    // Web Push subscriptions for the daily phrase reminder
+    await sql`CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id SERIAL PRIMARY KEY,
+      account_id INTEGER REFERENCES accounts(id),
+      endpoint TEXT UNIQUE NOT NULL,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_push_subs_account_id ON push_subscriptions(account_id)`;
 
     // Seed test promo code — idempotent
     await sql`

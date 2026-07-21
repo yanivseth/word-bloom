@@ -31,15 +31,18 @@ const MONTHLY_STRIPE_LINK = "https://buy.stripe.com/4gM8wP3eogLecyt3ey9fW02";
 const YEARLY_STRIPE_LINK = "https://buy.stripe.com/6oU3cv8yI52wcytpeXg9fW03";
 
 const FREE_FEATURES = [
-  "1 daily phrase",
+  "1 daily phrase (+1 reshuffle per day)",
+  "“Said it!” word logging & celebrations",
+  "Progress charts & milestone cards",
+  "Daily reminder notifications",
   "1 child profile",
-  "Basic word tracking",
 ];
 
 const PREMIUM_FEATURES = [
-  "Unlimited daily phrases",
-  "Up to 5 child profiles",
-  "Word tracking for all children",
+  "3 personalized phrases every day",
+  "Phrase packs for the moment you're in — play, meals, bath, bedtime, outside",
+  "Unlimited phrase refreshes",
+  "Up to 5 child profiles, with progress for each",
 ];
 
 function Pricing() {

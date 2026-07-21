@@ -1,8 +1,10 @@
 {
   "name": "WordBloom — Grow your child's vocabulary",
   "short_name": "WordBloom",
+  "id": "wordbloom",
   "description": "Daily, personalized phrases to build your baby's vocabulary",
-  "start_url": "/",
+  "start_url": "/dashboard",
+  "scope": "/",
   "display": "standalone",
   "theme_color": "#6d7f5f",
   "background_color": "#fefdfb",
@@ -10,7 +12,14 @@
     {
       "src": "/favicon.svg",
       "sizes": "any",
-      "type": "image/svg+xml"
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
     }
   ]
 }
