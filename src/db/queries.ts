@@ -491,7 +491,7 @@ export const addWord = createServerFn({ method: "POST" })
       const source = data.source === "suggestion" ? "suggestion" : "manual";
       await sql`
         INSERT INTO words (child_id, word, type, source)
-        VALUES (${data.childId}, ${data.word}, ${wordType}, ${source})
+        VALUES (${data.childId}, ${data.word.toLowerCase().trim()}, ${wordType}, ${source})
       `;
     } catch (e) {
       console.error("addWord failed:", e);
@@ -546,7 +546,7 @@ export const deleteWord = createServerFn({ method: "POST" })
       const sql = getSql();
       await sql`
         DELETE FROM words
-        WHERE child_id = ${data.childId} AND word = ${data.word}
+        WHERE child_id = ${data.childId} AND LOWER(word) = LOWER(${data.word})
       `;
     } catch (e) {
       console.error("deleteWord failed:", e);

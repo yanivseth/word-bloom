@@ -572,7 +572,7 @@ function DashboardContent() {
   const handleAddWord = useCallback(
     (e: React.FormEvent) => {
       e.preventDefault();
-      const trimmed = newWord.trim();
+      const trimmed = newWord.trim().toLowerCase();
       if (!trimmed) return;
       if (words.includes(trimmed)) {
         setNewWord("");
@@ -595,7 +595,7 @@ function DashboardContent() {
 
   const handleDeleteWord = useCallback(
     (word: string) => {
-      const updatedWords = words.filter((w) => w !== word);
+      const updatedWords = words.filter((w) => w.toLowerCase() !== word.toLowerCase());
       setWords(updatedWords);
       deleteWord(word);
       regenerate(updatedWords, edition, contextChoice, false);
@@ -625,7 +625,7 @@ function DashboardContent() {
       setCelebrating(word);
       setTimeout(() => setCelebrating(null), 1500);
 
-      const trimmed = word.trim();
+      const trimmed = word.trim().toLowerCase();
       if (!trimmed || words.includes(trimmed)) return;
 
       addWord(trimmed, "suggestion");

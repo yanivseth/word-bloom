@@ -250,7 +250,7 @@ function WordsOverTimeChart({ entries }: { entries: WordEntry[] }) {
             {hover.count} word{hover.count === 1 ? "" : "s"}
           </span>{" "}
           <span className="text-gray-500">
-            · &ldquo;{hover.word}&rdquo; · {fmtDate(hover.date)}
+            · &ldquo;{hover.word.charAt(0).toUpperCase() + hover.word.slice(1)}&rdquo; · {fmtDate(hover.date)}
           </span>
         </div>
       )}
@@ -351,7 +351,7 @@ function drawShareCard(
   if (latestWords.length > 0) {
     ctx.fillStyle = "#7e5cad";
     ctx.font = "44px system-ui, sans-serif";
-    const latest = latestWords.map((w) => `“${w}”`).join("  ");
+    const latest = latestWords.map((w) => `“${w.charAt(0).toUpperCase() + w.slice(1)}”`).join("  ");
     ctx.fillText(`Latest: ${latest}`, S / 2, 850);
   }
 
@@ -658,7 +658,7 @@ function ProgressPage() {
                             className="border-b border-cream-100 last:border-0"
                           >
                             <td className="px-4 py-2 font-medium text-gray-800">
-                              {e.word}
+                              {e.word.charAt(0).toUpperCase() + e.word.slice(1)}
                             </td>
                             <td className="px-4 py-2 text-gray-500">
                               {new Date(e.dateAdded).toLocaleDateString(
