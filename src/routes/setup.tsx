@@ -3,7 +3,6 @@ import { useState, useMemo, useEffect, useRef, type FormEvent } from "react";
 import {
   saveChild,
   getChild,
-  setupAccount,
   getOrCreateChild,
   syncInitialWordsToDb,
   getSession,
@@ -249,13 +248,21 @@ function Setup() {
    * Send a magic sign-in link and route the UI accordingly. Returns true when
    * it handled the flow (link sent, or completed via the degraded direct-token
    * path), false on error so the caller can decide what to do next.
+   *
+   * `childData` is included in the magic-token payload so that when a new
+   * parent verifies their email, the child is already created and they land
+   * directly on the dashboard.  Omit for returning parents who already have
+   * a child linked to their account.
    */
-  const sendMagicLink = async (rawEmail: string): Promise<boolean> => {
+  const sendMagicLink = async (
+    rawEmail: string,
+    childData?: { childName?: string; birthDate?: string; words?: string[] },
+  ): Promise<boolean> => {
     const trimmed = rawEmail.trim();
     if (!trimmed) return false;
     setLinkError(null);
 
-    const res = await requestMagicLink(trimmed);
+    const res = await requestMagicLink(trimmed, childData);
     if (!res.ok) {
       setLinkError(res.error ?? "Couldn't send the link. Please try again.");
       return false;
@@ -385,53 +392,19 @@ function Setup() {
     }
 
     // ── Normal setup mode ───────────────────────────────────────────────
-    const child: Child = {
-      name: trimmedName,
+
+    // ALWAYS go through magic-link verification, whether the account is new
+    // or returning.  For new accounts we include the child data in the token
+    // payload so that when the link is verified, the child is created
+    // automatically and the parent lands on the /dashboard.  Returning
+    // parents already have their child linked, so no payload needed.
+    await sendMagicLink(trimmedEmail, {
+      childName: trimmedName,
       birthDate: finalBirthDate,
       words,
-    };
-
-    // Guard: if this email already has an account, don't grant access from the
-    // signup form — require the parent to prove they control the inbox. (This
-    // also catches autofilled emails that never triggered the onBlur check.)
-    let existingAccount = null;
-    try {
-      const { getAccountByEmail } = await import("~/db/queries");
-      existingAccount = await getAccountByEmail({
-        data: { email: trimmedEmail.toLowerCase() },
-      });
-    } catch {
-      // DB unavailable — treat as new and fall through to offline setup.
-    }
-
-    if (existingAccount) {
-      const handled = await sendMagicLink(trimmedEmail);
-      setSubmitting(false);
-      if (!handled) setReturningAccount(null);
-      return;
-    }
-
-    // New account — create it and sign in immediately (low friction; the
-    // parent is only ever seeing data they just entered themselves).
-    const result = await setupAccount(
-      trimmedEmail,
-      trimmedName,
-      finalBirthDate,
-      words,
-    );
-
-    if (!result) {
-      saveChild(child);
-      getOrCreateChild(trimmedName, finalBirthDate).then((childId) => {
-        if (childId && words.length > 0) {
-          syncInitialWordsToDb(words);
-        }
-      });
-    }
-
-    setTimeout(() => {
-      navigate({ to: "/dashboard" });
-    }, 800);
+    });
+    setSubmitting(false);
+    return;
   };
 
   // Live age display
