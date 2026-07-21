@@ -87,7 +87,10 @@ export async function getAccount(): Promise<{
  * provider is configured) a `devToken` the caller can use to finish sign-in
  * directly — keeping the app usable before RESEND_API_KEY is set.
  */
-export async function requestMagicLink(email: string): Promise<{
+export async function requestMagicLink(
+  email: string,
+  childData?: { childName?: string; birthDate?: string; words?: string[] },
+): Promise<{
   ok: boolean;
   sent: boolean;
   isNew: boolean;
@@ -96,7 +99,14 @@ export async function requestMagicLink(email: string): Promise<{
 }> {
   try {
     const { requestMagicLink: dbRequest } = await import("~/db/queries");
-    const result = await dbRequest({ data: { email: email.toLowerCase().trim() } });
+    const result = await dbRequest({
+      data: {
+        email: email.toLowerCase().trim(),
+        childName: childData?.childName,
+        birthDate: childData?.birthDate,
+        words: childData?.words,
+      },
+    });
     if (!result.ok) {
       return { ok: false, sent: false, isNew: false, error: result.error };
     }

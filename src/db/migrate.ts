@@ -90,6 +90,7 @@ export async function runMigrations(): Promise<void> {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_magic_tokens_token ON magic_tokens(token)`;
+    await sql`ALTER TABLE magic_tokens ADD COLUMN IF NOT EXISTS payload JSONB`;
 
     // Web Push subscriptions for the daily phrase reminder
     await sql`CREATE TABLE IF NOT EXISTS push_subscriptions (

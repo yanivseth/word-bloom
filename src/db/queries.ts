@@ -292,7 +292,12 @@ async function sendEmailViaResend(
  * is required.
  */
 export const requestMagicLink = createServerFn({ method: "POST" })
-  .validator((data: { email: string }) => data)
+  .validator((data: {
+    email: string;
+    childName?: string;
+    birthDate?: string;
+    words?: string[];
+  }) => data)
   .handler(async ({ data }) => {
     await runMigrations();
     try {
@@ -305,14 +310,25 @@ export const requestMagicLink = createServerFn({ method: "POST" })
       const existing = await sql`SELECT id FROM accounts WHERE email = ${email}`;
       const isNew = existing.length === 0;
 
+      // Build payload for child data (only stored when email is new — no
+      // point passing it for returning accounts that already have a child).
+      const payload =
+        isNew && (data.childName || data.birthDate)
+          ? JSON.stringify({
+              childName: data.childName ?? null,
+              birthDate: data.birthDate ?? null,
+              words: data.words ?? [],
+            })
+          : null;
+
       const token = `${crypto.randomUUID()}${crypto.randomUUID()}`.replace(
         /-/g,
         "",
       );
       const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
       await sql`
-        INSERT INTO magic_tokens (email, token, expires_at)
-        VALUES (${email}, ${token}, ${expiresAt})
+        INSERT INTO magic_tokens (email, token, expires_at, payload)
+        VALUES (${email}, ${token}, ${expiresAt}, ${payload ? sql`${payload}::jsonb` : null})
       `;
 
       const link = `${siteBaseUrl()}/auth/verify?token=${token}`;
@@ -355,7 +371,7 @@ export const verifyMagicLink = createServerFn({ method: "POST" })
         WHERE token = ${token}
           AND used_at IS NULL
           AND expires_at > NOW()
-        RETURNING email
+        RETURNING email, payload
       `;
       if (claimed.length === 0) {
         // Distinguish expired/used from never-existed for a clearer message.
@@ -365,6 +381,7 @@ export const verifyMagicLink = createServerFn({ method: "POST" })
       }
 
       const email = String(claimed[0].email).toLowerCase().trim();
+      const rawPayload = claimed[0].payload as string | null;
 
       // Upsert account + rotate session token
       const sessionToken = crypto.randomUUID();
@@ -384,6 +401,47 @@ export const verifyMagicLink = createServerFn({ method: "POST" })
         DELETE FROM magic_tokens
         WHERE email = ${email} AND (used_at IS NOT NULL OR expires_at < NOW())
       `.catch(() => {});
+
+      // If the token carried child-setup payload and this account has no
+      // child yet, create the child + sync words from the payload so the
+      // parent lands on the dashboard with everything already in place.
+      if (rawPayload) {
+        const existingChild = await sql`
+          SELECT id FROM children
+          WHERE account_id = ${accountId}
+          LIMIT 1
+        `;
+        if (existingChild.length === 0) {
+          try {
+            const pl = JSON.parse(rawPayload) as {
+              childName?: string | null;
+              birthDate?: string | null;
+              words?: string[];
+            };
+            if (pl.childName && pl.birthDate) {
+              const childInsert = await sql`
+                INSERT INTO children (name, birth_date, account_id)
+                VALUES (${pl.childName}, ${pl.birthDate}, ${accountId})
+                RETURNING id
+              `;
+              const newChildId = Number(childInsert[0].id);
+              // Sync initial words
+              if (pl.words && pl.words.length > 0) {
+                for (const w of pl.words) {
+                  const norm = w.toLowerCase().trim();
+                  if (!norm) continue;
+                  await sql`
+                    INSERT INTO words (child_id, word, type, source)
+                    VALUES (${newChildId}, ${norm}, 'word', 'manual')
+                  `.catch(() => {});
+                }
+              }
+            }
+          } catch {
+            // Payload parse failed — ignore and proceed without child.
+          }
+        }
+      }
 
       // Linked child (first, if any)
       const childRows = await sql`
