@@ -1,5 +1,6 @@
 import { LEXICON, LEXICON_MAP, type LexiconEntry } from "./lexicon";
 import type { Phrase, WordClassification } from "./types";
+import { rngFromSeed, shuffle } from "./utils";
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -104,31 +105,6 @@ function generateProperNounPhrases(
     });
   }
   return phrases;
-}
-
-/** Score a lexicon entry against the child's known word list */
-function scoreEntry(
-  entry: LexiconEntry,
-  knownWords: string[],
-  ageMonths: number,
-): number {
-  let score = 0;
-
-  // Direct match: child already says this word
-  if (knownWords.some((w) => w.toLowerCase().trim() === entry.word)) {
-    score = 10; // highest priority for building on known words
-  }
-
-  // Age bonus: words near the child's age get priority
-  const ageDelta = Math.abs(entry.ageMonths - ageMonths);
-  if (ageDelta <= 3) score += 2;
-  else if (ageDelta <= 6) score += 1;
-
-  // Tier bonus: words in child's likely phonetic tier
-  const childTier = ageToTier(ageMonths);
-  if (entry.phoneticTier <= childTier) score += 1;
-
-  return score;
 }
 
 function ageToTier(ageMonths: number): number {
@@ -447,19 +423,143 @@ const STARTER_PHRASES: Record<string, Phrase[]> = {
   ],
 };
 
+// ── Two-word combinations ────────────────────────────────────
+// Once a child has a base of single words (~18mo+), the developmentally
+// correct next step is two-word combinations (pivot grammar): agent+action,
+// modifier+object, recurrence ("more X"). These build on words the child
+// ALREADY says, so they anchor to real vocabulary.
+
+interface ComboTemplate {
+  build: (w: string, cap: string) => string;
+  combo: string; // the two-word target, for the "+ word" badge
+  categories: LexiconEntry["category"][];
+}
+
+const COMBO_TEMPLATES: ComboTemplate[] = [
+  {
+    build: (w) => `More ${w}? You want more ${w}! Here's more ${w}.`,
+    combo: "more",
+    categories: ["food", "toy", "social"],
+  },
+  {
+    build: (w, cap) => `${cap} please! Can you say "${w} please"?`,
+    combo: "please",
+    categories: ["food", "toy"],
+  },
+  {
+    build: (w) => `Big ${w}! Look at the big ${w}. So big!`,
+    combo: "big",
+    categories: ["animal", "toy", "body", "food"],
+  },
+  {
+    build: (w, cap) => `${cap} gone! Where did the ${w} go? All gone!`,
+    combo: "gone",
+    categories: ["food", "toy", "animal"],
+  },
+  {
+    build: (w) => `My ${w}! That's your ${w}. Your very own ${w}!`,
+    combo: "my",
+    categories: ["toy", "body", "people"],
+  },
+  {
+    build: (w, cap) => `${cap} up! Pick the ${w} up. Up, up, up!`,
+    combo: "up",
+    categories: ["toy", "animal"],
+  },
+  {
+    build: (w) => `Night-night, ${w}. The ${w} is sleeping. Shh!`,
+    combo: "night-night",
+    categories: ["toy", "animal", "people"],
+  },
+];
+
+/**
+ * Generate two-word-combination phrases from words the child already says.
+ * Only fires for children ~18mo+ with a few real words logged.
+ */
+function generateComboPhrases(
+  childWords: string[],
+  ageMonths: number,
+  rng: () => number,
+  maxCount: number,
+): Phrase[] {
+  if (ageMonths < 18) return [];
+
+  // Known words that are real lexicon nouns/objects (not sounds or verbs)
+  const comboable = childWords
+    .map((w) => LEXICON_MAP.get(w.toLowerCase().trim()))
+    .filter((e): e is LexiconEntry =>
+      Boolean(
+        e &&
+          ["food", "toy", "animal", "body", "people"].includes(e.category),
+      ),
+    );
+  if (comboable.length < 2) return []; // needs a small word base first
+
+  const phrases: Phrase[] = [];
+  const entries = shuffle(comboable, rng);
+  const templates = shuffle(COMBO_TEMPLATES, rng);
+
+  for (const entry of entries) {
+    if (phrases.length >= maxCount) break;
+    const template = templates.find((t) => t.categories.includes(entry.category));
+    if (!template) continue;
+    const w = entry.word;
+    const cap = w.charAt(0).toUpperCase() + w.slice(1);
+    phrases.push({
+      id: `combo-${++phraseCounter}`,
+      text: template.build(w, cap),
+      context: CATEGORY_CONTEXTS[entry.category] || "Anytime",
+      basedOnWord: w,
+      newWord: `${template.combo} + ${w}`,
+      targetWord: template.combo,
+      tip: `Two-word combos are the next step after single words. Model "${template.combo} ${w}" — no need to make your child repeat it.`,
+    });
+    // Don't reuse the same template twice in one batch
+    templates.splice(templates.indexOf(template), 1);
+    if (templates.length === 0) break;
+  }
+  return phrases;
+}
+
 // ── Main engine ──────────────────────────────────────────────
 
 let phraseCounter = 0;
 
+export interface GenerateOptions {
+  count?: number;
+  contextHint?: string;
+  /**
+   * Deterministic seed (e.g. `${childId}:${YYYY-MM-DD}:${edition}`). The same
+   * seed always yields the same phrases — this is what makes "today's
+   * phrases" a stable daily edition instead of a slot machine.
+   */
+  seed?: string;
+  /**
+   * True when contextHint came from an automatic signal (time of day) rather
+   * than an explicit parent choice — a soft hint nudges ordering but doesn't
+   * demote two-word combos below context matches.
+   */
+  contextIsSoft?: boolean;
+}
+
 export function generatePhrases(
   childWords: string[],
   ageMonths: number,
-  count: number = 3,
-  contextHint?: string,
+  countOrOptions: number | GenerateOptions = 3,
+  legacyContextHint?: string,
 ): Phrase[] {
+  const opts: GenerateOptions =
+    typeof countOrOptions === "number"
+      ? { count: countOrOptions, contextHint: legacyContextHint }
+      : countOrOptions;
+  const count = opts.count ?? 3;
+  const contextHint = opts.contextHint;
+  const rng = rngFromSeed(opts.seed);
+
   // ── Cold start: no words yet ────────────────────────────
   if (!childWords || childWords.length === 0) {
-    return getColdStartPhrases(ageMonths, count);
+    return getColdStartPhrases(ageMonths, count, undefined, rng);
   }
 
   interface ScoredPhrase {
@@ -493,7 +593,25 @@ export function generatePhrases(
   // ── Step 3: Expand to next-step words ──────────────────
   const expansions = findExpansions(matchedEntries, childWords, ageMonths);
 
-  // ── Step 4: Generate proper noun phrases (score 3) ─────
+  // Context bonus: entries whose natural context matches the hint float up
+  const contextBonus = (entry: LexiconEntry): number => {
+    if (!contextHint) return 0;
+    const hinted = CONTEXT_KEYWORDS[contextHint.toLowerCase().trim()] ?? contextHint.toLowerCase().trim();
+    return resolveContext(entry) === hinted ? 0.5 : 0;
+  };
+
+  const knownSet = new Set(childWords.map((w) => w.toLowerCase().trim()));
+
+  // ── Step 4: Two-word combinations ──────────────────────
+  // The developmentally-right next step, so they lead (score 5) — except when
+  // the parent asked for a specific context, where context-matching phrases
+  // should win (combos drop below them, score 2.5).
+  const comboScore = contextHint && !opts.contextIsSoft ? 2.5 : 5;
+  for (const p of generateComboPhrases(childWords, ageMonths, rng, 2)) {
+    results.push({ phrase: p, score: comboScore });
+  }
+
+  // ── Step 5: Proper noun phrases (score 3) ──────────────
   for (const name of properNouns) {
     const pnPhrases = generateProperNounPhrases(name, 1);
     for (const p of pnPhrases) {
@@ -501,16 +619,17 @@ export function generatePhrases(
     }
   }
 
-  // ── Step 5: Generate phrase candidates ─────────────────
-  // From direct matches (score 3)
+  // ── Step 6: Phrase candidates from lexicon matches ─────
+  // Exact known words (child already says the word — reinforce + expand it)
+  // score 4; phonetic neighbors of a known sound (scaffolding) score 3.
   for (const { childWord, entry } of allMatches) {
-    const phrases = pickPhrasesForEntry(entry, childWord, contextHint, 3);
+    if (usedEntries.has(entry.word)) continue;
+    const isExact = knownSet.has(entry.word);
+    const phrases = pickPhrasesForEntry(entry, childWord, contextHint, 3, rng);
     for (const p of phrases) {
-      if (!usedEntries.has(entry.word)) {
-        results.push({ phrase: p, score: 3 });
-        usedEntries.add(entry.word);
-      }
+      results.push({ phrase: p, score: (isExact ? 4 : 3) + contextBonus(entry) });
     }
+    usedEntries.add(entry.word);
   }
 
   // From phonetic expansions (score 2)
@@ -519,9 +638,9 @@ export function generatePhrases(
     // Find which known word is closest phonetically
     const closestCV = findClosestKnownCV(entry.initialCV, allMatches);
     const basedOn = closestCV || entry.word;
-    const phrases = pickPhrasesForEntry(entry, basedOn, contextHint, entry.phrases.length <= 1 ? 1 : 2);
+    const phrases = pickPhrasesForEntry(entry, basedOn, contextHint, entry.phrases.length <= 1 ? 1 : 2, rng);
     for (const p of phrases) {
-      results.push({ phrase: p, score: 2 });
+      results.push({ phrase: p, score: 2 + contextBonus(entry) });
     }
     usedEntries.add(entry.word);
   }
@@ -532,19 +651,16 @@ export function generatePhrases(
     if (results.length >= count * 4) break; // enough candidates
     if (usedEntries.has(entry.word)) continue;
     if (entry.phoneticTier <= tier + 1 && entry.ageMonths <= ageMonths + 3) {
-      const phrases = pickPhrasesForEntry(entry, entry.word, contextHint, 1);
+      const phrases = pickPhrasesForEntry(entry, entry.word, contextHint, 1, rng);
       for (const p of phrases) {
-        results.push({ phrase: p, score: 1 });
+        results.push({ phrase: p, score: 1 + contextBonus(entry) });
       }
       usedEntries.add(entry.word);
     }
   }
 
-  // ── Step 6: Sort & select ──────────────────────────────
-  // Sort by score descending, then shuffle within same score for variety
-  results.sort((a, b) => b.score - a.score);
-
-  // Within each score band, shuffle
+  // ── Step 7: Sort & select ──────────────────────────────
+  // Group into score bands; shuffle within each band (seeded) for variety
   const bands: Map<number, ScoredPhrase[]> = new Map();
   for (const r of results) {
     const band = bands.get(r.score) || [];
@@ -554,12 +670,14 @@ export function generatePhrases(
 
   const final: Phrase[] = [];
   for (const [, band] of [...bands.entries()].sort((a, b) => b[0] - a[0])) {
-    // Shuffle the band
-    const shuffled = [...band].sort(() => Math.random() - 0.5);
-    for (const s of shuffled) {
+    for (const s of shuffle(band, rng)) {
       if (final.length >= count) break;
-      // Avoid duplicates
-      if (!final.some((f) => f.text === s.phrase.text)) {
+      // Avoid duplicates and more than one phrase per base word
+      if (
+        !final.some(
+          (f) => f.text === s.phrase.text || (f.newWord && f.newWord === s.phrase.newWord),
+        )
+      ) {
         final.push(s.phrase);
       }
     }
@@ -568,14 +686,12 @@ export function generatePhrases(
 
   // If we still don't have enough, fill from cold start
   if (final.length < count) {
-    const cold = getColdStartPhrases(ageMonths, count - final.length, childWords);
+    const cold = getColdStartPhrases(ageMonths, count - final.length, childWords, rng);
     for (const c of cold) {
       if (!final.some((f) => f.text === c.text)) {
         final.push(c);
       }
     }
-    // Limit to count
-    return final.slice(0, count);
   }
 
   return final.slice(0, count);
@@ -583,16 +699,44 @@ export function generatePhrases(
 
 // ── Internal helpers ────────────────────────────────────────
 
+/** Words in a phrase template that signal it fits a given context */
+const CONTEXT_TEXT_KEYWORDS: Record<string, string[]> = {
+  mealtime: ["eat", "yummy", "snack", "milk", "cup", "bite", "breakfast", "hungry", "food", "table"],
+  bathtime: ["bath", "splash", "wash", "water", "wet", "tub", "bubble"],
+  bedtime: ["sleep", "night", "nap", "bed", "shh", "blanket", "story"],
+  playtime: ["play", "toy", "roll", "build", "block", "stack", "throw"],
+  outside: ["outside", "walk", "park", "tree", "bird", "sky", "run"],
+};
+
+function templateMatchesContext(template: string, context: string): boolean {
+  const keywords = CONTEXT_TEXT_KEYWORDS[context];
+  if (!keywords) return false;
+  const lower = template.toLowerCase();
+  return keywords.some((k) => lower.includes(k));
+}
+
 function pickPhrasesForEntry(
   entry: LexiconEntry,
   basedOnWord: string,
   contextHint: string | undefined,
   maxCount: number,
+  rng: () => number,
 ): Phrase[] {
   const phrases: Phrase[] = [];
   const usedTexts = new Set<string>();
 
-  for (const template of entry.phrases) {
+  // When a context is requested, put templates whose TEXT actually fits that
+  // context first — so "bath time phrases" are about baths, not just labeled so.
+  const resolvedHint = contextHint ? resolveContext(entry, contextHint) : null;
+  const orderedTemplates = resolvedHint
+    ? [...entry.phrases].sort(
+        (a, b) =>
+          Number(templateMatchesContext(b, resolvedHint)) -
+          Number(templateMatchesContext(a, resolvedHint)),
+      )
+    : entry.phrases;
+
+  for (const template of orderedTemplates) {
     if (phrases.length >= maxCount) break;
     if (usedTexts.has(template)) continue;
     usedTexts.add(template);
@@ -602,7 +746,7 @@ function pickPhrasesForEntry(
     // Determine context text
     const ctxText =
       contextHint && CONTEXT_SPECIFIC_PHRASES[context]
-        ? pickRandom(CONTEXT_SPECIFIC_PHRASES[context])
+        ? pickRandom(CONTEXT_SPECIFIC_PHRASES[context], rng)
         : CATEGORY_CONTEXTS[entry.category] || "Anytime";
 
     const isDirectlyKnown = basedOnWord !== entry.word;
@@ -659,14 +803,15 @@ function findClosestKnownCV(
 function getColdStartPhrases(
   ageMonths: number,
   count: number,
-  childWords?: string[],
+  childWords: string[] | undefined,
+  rng: () => number,
 ): Phrase[] {
   // If parent entered words, try to personalize the cold start
   if (childWords && childWords.length > 0) {
     for (const cw of childWords) {
       const matches = findMatches(cw);
       if (matches.length > 0) {
-        return generatePersonalizedColdStart(matches[0], cw, count);
+        return generatePersonalizedColdStart(matches[0], cw, count, rng);
       }
     }
   }
@@ -679,8 +824,7 @@ function getColdStartPhrases(
   else bracket = "24-36";
 
   const pool = STARTER_PHRASES[bracket] || STARTER_PHRASES["12-18"];
-  const shuffled = [...pool].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, count).map((p) => ({
+  return shuffle(pool, rng).slice(0, count).map((p) => ({
     ...p,
     id: `start-${++phraseCounter}`,
   }));
@@ -691,6 +835,7 @@ function generatePersonalizedColdStart(
   entry: LexiconEntry,
   childWord: string,
   count: number,
+  rng: () => number,
 ): Phrase[] {
   const babble = childWord.toLowerCase().trim();
   const babbleRepeated = `${babble}-${babble}-${babble}`;
@@ -699,7 +844,7 @@ function generatePersonalizedColdStart(
   const context = CATEGORY_CONTEXTS[entry.category] || "Anytime";
 
   const phrases: Phrase[] = [];
-  const pool = [...entry.phrases].sort(() => Math.random() - 0.5);
+  const pool = shuffle(entry.phrases, rng);
 
   for (let i = 0; i < Math.min(count, pool.length); i++) {
     phrases.push({
@@ -718,8 +863,7 @@ function generatePersonalizedColdStart(
     );
     const genericPool =
       STARTER_PHRASES[bracket] || STARTER_PHRASES["12-18"];
-    const shuffled = [...genericPool].sort(() => Math.random() - 0.5);
-    for (const p of shuffled) {
+    for (const p of shuffle(genericPool, rng)) {
       if (phrases.length >= count) break;
       if (!phrases.some((f) => f.text === p.text)) {
         phrases.push({ ...p, id: `start-pers-${++phraseCounter}` });
@@ -737,6 +881,6 @@ function ageMonthsToBracket(ageMonths: number): string {
   return "24-36";
 }
 
-function pickRandom<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
+function pickRandom<T>(arr: T[], rng: () => number): T {
+  return arr[Math.floor(rng() * arr.length)];
 }

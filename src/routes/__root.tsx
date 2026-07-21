@@ -20,6 +20,9 @@ export const Route = createRootRoute({
           "WordBloom gives parents daily, personalized phrases to build their baby's vocabulary.",
       },
       { name: "theme-color", content: "#6d7f5f" },
+      { name: "apple-mobile-web-app-capable", content: "yes" },
+      { name: "apple-mobile-web-app-status-bar-style", content: "default" },
+      { name: "apple-mobile-web-app-title", content: "WordBloom" },
       { property: "og:title", content: "WordBloom — Grow your child's vocabulary" },
       {
         property: "og:description",

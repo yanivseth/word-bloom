@@ -33,7 +33,11 @@ cat > .vercel/output/functions/render.func/.vc-config.json <<'JSON'
 { "runtime": "nodejs22.x", "handler": "index.mjs", "launcherType": "Nodejs", "supportsResponseStreaming": true }
 JSON
 cat > .vercel/output/config.json <<'JSON'
-{ "version": 3, "routes": [ { "handle": "filesystem" }, { "src": "/(.*)", "dest": "/render" } ] }
+{
+  "version": 3,
+  "routes": [ { "handle": "filesystem" }, { "src": "/(.*)", "dest": "/render" } ],
+  "crons": [ { "path": "/api/push-daily", "schedule": "0 13 * * *" } ]
+}
 JSON
 
 echo "done -> .vercel/output ready for: bunx vercel deploy --prebuilt"

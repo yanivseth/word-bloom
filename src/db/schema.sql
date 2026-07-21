@@ -20,7 +20,10 @@ CREATE TABLE IF NOT EXISTS words (
   child_id INTEGER REFERENCES children(id) ON DELETE CASCADE,
   word TEXT NOT NULL,
   date_added TIMESTAMPTZ DEFAULT NOW(),
-  type TEXT DEFAULT 'word' CHECK (type IN ('sound', 'approximation', 'word'))
+  type TEXT DEFAULT 'word' CHECK (type IN ('sound', 'approximation', 'word')),
+  -- 'manual' = parent typed it; 'suggestion' = logged via the "Said it!"
+  -- button on a phrase card (phrase-effectiveness signal)
+  source TEXT DEFAULT 'manual'
 );
 
 CREATE INDEX IF NOT EXISTS idx_words_child_id ON words(child_id);
@@ -41,6 +44,17 @@ CREATE TABLE IF NOT EXISTS phrase_views (
   shown_at TIMESTAMPTZ DEFAULT NOW(),
   was_refreshed BOOLEAN DEFAULT FALSE
 );
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id SERIAL PRIMARY KEY,
+  account_id INTEGER REFERENCES accounts(id),
+  endpoint TEXT UNIQUE NOT NULL,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_push_subs_account_id ON push_subscriptions(account_id);
 
 CREATE TABLE IF NOT EXISTS promo_codes (
   id SERIAL PRIMARY KEY,

@@ -72,9 +72,14 @@ function Home() {
             description="Receive playful, research-backed phrases that build on what your child can already say."
           />
           <FeatureCard
+            emoji="🎉"
+            title="Tap “Said it!” when it happens"
+            description="The moment your child says a suggested word, one tap logs it — and tomorrow's phrases build on it."
+          />
+          <FeatureCard
             emoji="🌸"
             title="Watch them bloom"
-            description="Turn everyday moments — mealtime, bath time, play — into language-learning opportunities."
+            description="Progress charts, weekly recaps, and shareable milestone cards turn everyday moments into visible growth."
           />
         </div>
       </section>
