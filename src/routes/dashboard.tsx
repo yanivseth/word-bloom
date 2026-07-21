@@ -199,6 +199,23 @@ function ConfettiBurst() {
 function DashboardContent() {
   const navigate = useNavigate();
 
+  // ── Deduplication helper ───────────────────────────────────────────────────
+  // Words are normalized to lowercase at input, but case-insensitive duplicates
+  // can still sneak in from DB rows or localStorage merges. This keeps the
+  // first occurrence of each word (preserving insertion order).
+  const dedupeWords = useCallback((wordList: string[]): string[] => {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const w of wordList) {
+      const key = w.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(key); // normalize to lowercase
+      }
+    }
+    return result;
+  }, []);
+
   // ── Core state ────────────────────────────────────────────────────────────
   const [children, setChildren] = useState<ChildProfile[]>([]);
   const [activeChildId, setActiveChildIdState] = useState<number | null>(null);
@@ -361,7 +378,8 @@ function DashboardContent() {
               }
 
               if (!cancelled) {
-                setWords(childWords);
+                const deduped = dedupeWords(childWords);
+                setWords(deduped);
                 setWordDates(dates);
 
                 const childKey = String(active);
@@ -373,7 +391,7 @@ function DashboardContent() {
                     "2024-01-01",
                 );
                 const freshPhrases = buildPhrases(
-                  childWords,
+                  deduped,
                   childAge,
                   dbPremium,
                   childKey,
@@ -405,12 +423,13 @@ function DashboardContent() {
         // No session — use localStorage fallback
         const localWords = getWords();
         if (!cancelled) {
-          setWords(localWords);
+          const deduped = dedupeWords(localWords);
+          setWords(deduped);
           const currentPremium = isPremium();
           const storedEdition = getStoredEdition("local");
           setEdition(storedEdition);
           const freshPhrases = buildPhrases(
-            localWords,
+            deduped,
             ageInMonths(getChild()?.birthDate ?? "2024-01-01"),
             currentPremium,
             "local",
@@ -454,8 +473,9 @@ function DashboardContent() {
       const age = child ? ageInMonths(child.birthDate) : 18;
       const childKey = String(childId);
       const storedEdition = getStoredEdition(childKey);
+      const deduped = dedupeWords(childWords);
       const freshPhrases = buildPhrases(
-        childWords,
+        deduped,
         age,
         premium,
         childKey,
@@ -463,7 +483,7 @@ function DashboardContent() {
         contextChoice,
       );
 
-      setWords(childWords);
+      setWords(deduped);
       setWordDates(dates);
       setEdition(storedEdition);
       setPhrases(freshPhrases);
@@ -572,7 +592,7 @@ function DashboardContent() {
   const handleAddWord = useCallback(
     (e: React.FormEvent) => {
       e.preventDefault();
-      const trimmed = newWord.trim();
+      const trimmed = newWord.trim().toLowerCase();
       if (!trimmed) return;
       if (words.includes(trimmed)) {
         setNewWord("");
@@ -595,7 +615,7 @@ function DashboardContent() {
 
   const handleDeleteWord = useCallback(
     (word: string) => {
-      const updatedWords = words.filter((w) => w !== word);
+      const updatedWords = words.filter((w) => w.toLowerCase() !== word.toLowerCase());
       setWords(updatedWords);
       deleteWord(word);
       regenerate(updatedWords, edition, contextChoice, false);
@@ -625,7 +645,7 @@ function DashboardContent() {
       setCelebrating(word);
       setTimeout(() => setCelebrating(null), 1500);
 
-      const trimmed = word.trim();
+      const trimmed = word.trim().toLowerCase();
       if (!trimmed || words.includes(trimmed)) return;
 
       addWord(trimmed, "suggestion");
