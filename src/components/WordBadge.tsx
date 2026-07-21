@@ -24,6 +24,8 @@ export function WordBadge({ word, onDelete, classification }: WordBadgeProps) {
   if (deleting) return null;
 
   const isProperNoun = classification?.type === "proper_noun";
+  // Display with first letter capitalized for consistent, parent-friendly presentation
+  const displayWord = word.charAt(0).toUpperCase() + word.slice(1);
 
   return (
     <span
@@ -33,7 +35,7 @@ export function WordBadge({ word, onDelete, classification }: WordBadgeProps) {
           : "bg-lavender-100 text-lavender-800 hover:bg-lavender-200"
       }`}
     >
-      <span className="truncate">{word}</span>
+      <span className="truncate">{displayWord}</span>
       {isProperNoun && (
         <span className="shrink-0 rounded-full bg-amber-200 px-1.5 py-0 text-[10px] font-semibold text-amber-700">
           name
