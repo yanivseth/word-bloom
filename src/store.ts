@@ -415,10 +415,10 @@ export function addWord(
 
   const childId = getActiveChildId() ?? getChildId();
 
-  // Per-child cache (multi-child safe)
+  // Per-child cache (multi-child safe) — case-insensitive dedup
   if (childId) {
     const cached = getCachedChildWords(childId);
-    if (!cached.includes(trimmed)) {
+    if (!cached.some((w) => w.toLowerCase() === trimmed)) {
       setCachedChildWords(childId, [...cached, trimmed]);
     }
   }
@@ -427,7 +427,7 @@ export function addWord(
   // (no childId) so multi-child accounts don't mix words into one record.
   if (!childId) {
     const child = getChild();
-    if (!child || child.words.includes(trimmed)) return;
+    if (!child || child.words.some((w) => w.toLowerCase() === trimmed)) return;
     child.words.push(trimmed);
     saveChild(child);
     return;

@@ -489,9 +489,18 @@ export const addWord = createServerFn({ method: "POST" })
       const sql = getSql();
       const wordType = data.type ?? "word";
       const source = data.source === "suggestion" ? "suggestion" : "manual";
+      const normalized = data.word.toLowerCase().trim();
+      // Check for existing word (case-insensitive) before inserting to avoid
+      // duplicates — the words table has no UNIQUE constraint on (child_id, word).
+      const existing = await sql`
+        SELECT id FROM words
+        WHERE child_id = ${data.childId} AND LOWER(word) = ${normalized}
+        LIMIT 1
+      `;
+      if (existing.length > 0) return; // Word already exists — skip
       await sql`
         INSERT INTO words (child_id, word, type, source)
-        VALUES (${data.childId}, ${data.word.toLowerCase().trim()}, ${wordType}, ${source})
+        VALUES (${data.childId}, ${normalized}, ${wordType}, ${source})
       `;
     } catch (e) {
       console.error("addWord failed:", e);
@@ -505,9 +514,9 @@ export const getWords = createServerFn({ method: "GET" })
     try {
       const sql = getSql();
       const rows = await sql`
-        SELECT word FROM words
+        SELECT DISTINCT ON (LOWER(word)) word, date_added FROM words
         WHERE child_id = ${data.childId}
-        ORDER BY date_added ASC
+        ORDER BY LOWER(word), date_added ASC
       `;
       return rows.map((r) => String(r.word)) as string[];
     } catch (e) {
@@ -523,9 +532,9 @@ export const getWordsWithDates = createServerFn({ method: "GET" })
     try {
       const sql = getSql();
       const rows = await sql`
-        SELECT word, date_added, source FROM words
+        SELECT DISTINCT ON (LOWER(word)) word, date_added, source FROM words
         WHERE child_id = ${data.childId}
-        ORDER BY date_added ASC
+        ORDER BY LOWER(word), date_added ASC
       `;
       return rows.map((r) => ({
         word: String(r.word),
