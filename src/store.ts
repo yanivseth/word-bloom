@@ -267,7 +267,8 @@ export async function setupAccount(
         if (words && words.length > 0) {
           const { addWord: dbAddWord } = await import("~/db/queries");
           for (const word of words) {
-            await dbAddWord({ data: { childId, word } }).catch(() => {});
+            const normalized = word.toLowerCase().trim();
+            await dbAddWord({ data: { childId, word: normalized } }).catch(() => {});
           }
         }
       }
@@ -409,7 +410,7 @@ export function addWord(
   source: "manual" | "suggestion" = "manual",
 ): void {
   if (typeof window === "undefined") return;
-  const trimmed = word.trim();
+  const trimmed = word.trim().toLowerCase();
   if (!trimmed) return;
 
   const childId = getActiveChildId() ?? getChildId();
@@ -452,11 +453,11 @@ export function deleteWord(word: string): void {
   if (childId) {
     setCachedChildWords(
       childId,
-      getCachedChildWords(childId).filter((w) => w !== word),
+      getCachedChildWords(childId).filter((w) => w.toLowerCase() !== word.toLowerCase()),
     );
     // Fire-and-forget: delete from DB in the background
     import("~/db/queries").then(({ deleteWord: dbDeleteWord }) => {
-      dbDeleteWord({ data: { childId, word } }).catch(() => {});
+      dbDeleteWord({ data: { childId, word: word.toLowerCase() } }).catch(() => {});
     });
     return;
   }
@@ -464,7 +465,7 @@ export function deleteWord(word: string): void {
   // Offline fallback record
   const child = getChild();
   if (!child) return;
-  child.words = child.words.filter((w) => w !== word);
+  child.words = child.words.filter((w) => w.toLowerCase() !== word.toLowerCase());
   saveChild(child);
 }
 
@@ -557,7 +558,10 @@ export async function syncWordsFromDb(): Promise<void> {
     if (words && words.length > 0) {
       const child = getChild();
       if (child) {
-        const merged = [...new Set([...words, ...child.words])];
+        // Merge and normalize to lowercase to prevent case-duplicates
+        const existingLower = new Set(child.words.map((w) => w.toLowerCase()));
+        const newWords = words.filter((w) => !existingLower.has(w.toLowerCase()));
+        const merged = [...child.words, ...newWords.map((w) => w.toLowerCase())];
         child.words = merged;
         saveChild(child);
       }
