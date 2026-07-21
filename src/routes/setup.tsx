@@ -12,6 +12,7 @@ import {
   isPremium,
   getChildCount,
   setActiveChildId,
+  requestMagicLink,
 } from "~/store";
 import type { Child } from "~/types";
 
@@ -115,6 +116,11 @@ function Setup() {
     existingChild?.words?.join(", ") ?? "",
   );
   const [submitting, setSubmitting] = useState(false);
+
+  // Magic-link sign-in: when a link is emailed, we show a "check your inbox"
+  // panel instead of granting a session. `linkError` surfaces send failures.
+  const [linkSent, setLinkSent] = useState<string | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
 
   // Returning parent detection
   const [checkingEmail, setCheckingEmail] = useState(false);
@@ -239,22 +245,41 @@ function Setup() {
       });
   };
 
+  /**
+   * Send a magic sign-in link and route the UI accordingly. Returns true when
+   * it handled the flow (link sent, or completed via the degraded direct-token
+   * path), false on error so the caller can decide what to do next.
+   */
+  const sendMagicLink = async (rawEmail: string): Promise<boolean> => {
+    const trimmed = rawEmail.trim();
+    if (!trimmed) return false;
+    setLinkError(null);
+
+    const res = await requestMagicLink(trimmed);
+    if (!res.ok) {
+      setLinkError(res.error ?? "Couldn't send the link. Please try again.");
+      return false;
+    }
+    if (res.sent) {
+      setLinkSent(trimmed);
+      return true;
+    }
+    // Degraded mode (no email provider configured): finish sign-in directly
+    // with the returned token — preserves the pre-magic-link experience.
+    if (res.devToken) {
+      navigate({ to: "/auth/verify", search: { token: res.devToken } });
+      return true;
+    }
+    setLinkError("Couldn't send the link. Please try again.");
+    return false;
+  };
+
   const handleReturningContinue = async () => {
     const trimmed = email.trim();
     if (!trimmed) return;
     setSubmitting(true);
-
-    const result = await setupAccount(trimmed);
-    if (result && !result.isNew) {
-      if (result.childId) {
-        const { syncWordsFromDb } = await import("~/store");
-        await syncWordsFromDb();
-      }
-      navigate({ to: "/dashboard" });
-    } else {
-      setSubmitting(false);
-      setReturningAccount(null);
-    }
+    await sendMagicLink(trimmed);
+    setSubmitting(false);
   };
 
   // ── Main submit ─────────────────────────────────────────────────────────
@@ -366,6 +391,28 @@ function Setup() {
       words,
     };
 
+    // Guard: if this email already has an account, don't grant access from the
+    // signup form — require the parent to prove they control the inbox. (This
+    // also catches autofilled emails that never triggered the onBlur check.)
+    let existingAccount = null;
+    try {
+      const { getAccountByEmail } = await import("~/db/queries");
+      existingAccount = await getAccountByEmail({
+        data: { email: trimmedEmail.toLowerCase() },
+      });
+    } catch {
+      // DB unavailable — treat as new and fall through to offline setup.
+    }
+
+    if (existingAccount) {
+      const handled = await sendMagicLink(trimmedEmail);
+      setSubmitting(false);
+      if (!handled) setReturningAccount(null);
+      return;
+    }
+
+    // New account — create it and sign in immediately (low friction; the
+    // parent is only ever seeing data they just entered themselves).
     const result = await setupAccount(
       trimmedEmail,
       trimmedName,
@@ -458,7 +505,50 @@ function Setup() {
           <p className="mt-2 text-gray-600">{headingSubtext}</p>
         </div>
 
+        {/* Check-your-inbox panel — shown after a magic link is emailed */}
+        {linkSent && (
+          <div className="animate-fade-in rounded-2xl border border-lavender-200 bg-white p-6 text-center shadow-sm">
+            <div className="text-4xl">📬</div>
+            <h2 className="mt-3 text-xl font-bold text-sage-800">
+              Check your inbox
+            </h2>
+            <p className="mt-2 text-gray-600">
+              We sent a secure sign-in link to{" "}
+              <span className="font-semibold text-sage-700">{linkSent}</span>.
+              Tap it to finish signing in — it expires in 30 minutes.
+            </p>
+            <p className="mt-3 text-xs text-gray-400">
+              Don&rsquo;t see it? Check your spam folder, or resend below.
+            </p>
+            <button
+              type="button"
+              onClick={async () => {
+                setSubmitting(true);
+                await sendMagicLink(linkSent);
+                setSubmitting(false);
+              }}
+              disabled={submitting}
+              className="mt-4 inline-flex items-center gap-2 rounded-full bg-cream-200 px-5 py-2 text-sm font-semibold text-sage-700 transition-all hover:bg-cream-300 active:scale-95 disabled:opacity-50 min-h-[44px]"
+            >
+              {submitting ? (
+                <>
+                  <Spinner />
+                  Resending...
+                </>
+              ) : (
+                "Resend link"
+              )}
+            </button>
+            {linkError && (
+              <p className="mt-2 text-sm font-medium text-red-500">
+                {linkError}
+              </p>
+            )}
+          </div>
+        )}
+
         {/* Form */}
+        {!linkSent && (
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Email field — hidden in add-child/edit mode (pre-filled from session) */}
           {!isAddChildMode && !isEditMode && (
@@ -503,6 +593,10 @@ function Setup() {
                   <p className="font-medium text-lavender-800">
                     ✨ Welcome back! We found your profile.
                   </p>
+                  <p className="mt-1 text-sm text-lavender-700">
+                    For your child&rsquo;s privacy, we&rsquo;ll email you a
+                    secure sign-in link — no password needed.
+                  </p>
                   <button
                     type="button"
                     onClick={handleReturningContinue}
@@ -512,12 +606,17 @@ function Setup() {
                     {submitting ? (
                       <>
                         <Spinner />
-                        Restoring...
+                        Sending link...
                       </>
                     ) : (
-                      "Continue →"
+                      "Email me a sign-in link →"
                     )}
                   </button>
+                  {linkError && (
+                    <p className="mt-2 text-sm font-medium text-red-500">
+                      {linkError}
+                    </p>
+                  )}
                 </div>
               )}
             </div>
@@ -612,6 +711,7 @@ function Setup() {
             </>
           )}
         </form>
+        )}
 
         {/* Back link */}
         <div className="mt-8 text-center">

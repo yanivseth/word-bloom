@@ -45,6 +45,17 @@ CREATE TABLE IF NOT EXISTS phrase_views (
   was_refreshed BOOLEAN DEFAULT FALSE
 );
 
+CREATE TABLE IF NOT EXISTS magic_tokens (
+  id SERIAL PRIMARY KEY,
+  email TEXT NOT NULL,
+  token TEXT UNIQUE NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_magic_tokens_token ON magic_tokens(token);
+
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   id SERIAL PRIMARY KEY,
   account_id INTEGER REFERENCES accounts(id),

@@ -47,6 +47,15 @@ Installable home-screen app + one daily reminder ("today's phrases are ready").
 ### 6. Stripe webhook (billing)
 Premium now activates **automatically** on payment (was manual).
 
+### 7. Magic-link auth (security)
+Closes the account-takeover hole where typing any known email restored that
+child's data. Restoring an existing account now **requires control of the
+inbox**: entering an existing email emails a single-use, 30-minute sign-in link
+(`/auth/verify?token=…`) instead of granting a session. New signups stay
+frictionless — a brand-new email creates the account and signs in immediately
+(the parent only ever sees data they just entered). Falls back to the old
+instant flow when no email provider is configured (see below).
+
 ---
 
 ## Environment variables
@@ -88,12 +97,36 @@ Then set:
 parent who pays **before** ever signing up gets premium waiting for them when they
 enter that email.
 
+### Magic-link auth (optional — degrades gracefully if unset)
+Sends single-use sign-in links via [Resend](https://resend.com).
+- `RESEND_API_KEY` — Resend API key (`re_…`). **Required to actually email links.**
+  When unset, the app stays fully usable: it returns the token to the client and
+  completes sign-in directly (the pre-magic-link behavior), so the live site keeps
+  working until you add the key.
+- `EMAIL_FROM` — sender, e.g. `WordBloom <hello@wordbloom.app>`. Must be a
+  Resend-verified domain. Defaults to `onboarding@resend.dev` (Resend's shared
+  test sender — fine for a first smoke test, replace with your domain for
+  deliverability).
+- `SITE_URL` — canonical base URL for links in emails, e.g.
+  `https://wordbloom.app`. Falls back to `VERCEL_URL` (auto-set by Vercel), then
+  `http://localhost:3000`. **Derived server-side only** — a forged client origin
+  can never redirect a token.
+
+Once `RESEND_API_KEY` is set, sign-in for existing accounts strictly requires a
+link delivered to the account's own inbox; the token is never returned to the
+client. Tokens are single-use (atomic claim) and expire after 30 minutes.
+
+**Recommended order to flip on for launch:** `RESEND_API_KEY` + `SITE_URL` (close
+the auth hole) → `STRIPE_WEBHOOK_SECRET` (automate billing) → `VAPID_*` (daily
+push). All three are independent and each degrades gracefully on its own.
+
 ---
 
 ## Database migrations
 All additive and idempotent (run automatically on first DB access):
 - `words.source TEXT DEFAULT 'manual'`
 - `push_subscriptions` table (+ index)
+- `magic_tokens` table (+ index)
 
 No manual migration step needed.
 

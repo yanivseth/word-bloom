@@ -78,6 +78,19 @@ export async function runMigrations(): Promise<void> {
       created_at TIMESTAMPTZ DEFAULT now()
     )`;
 
+    // Magic-link login tokens — single-use, short-lived. Proving control of an
+    // email is what lets a parent restore an existing account on a new device
+    // (typing the email alone no longer grants access).
+    await sql`CREATE TABLE IF NOT EXISTS magic_tokens (
+      id SERIAL PRIMARY KEY,
+      email TEXT NOT NULL,
+      token TEXT UNIQUE NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_magic_tokens_token ON magic_tokens(token)`;
+
     // Web Push subscriptions for the daily phrase reminder
     await sql`CREATE TABLE IF NOT EXISTS push_subscriptions (
       id SERIAL PRIMARY KEY,

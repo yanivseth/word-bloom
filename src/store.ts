@@ -79,6 +79,89 @@ export async function getAccount(): Promise<{
   }
 }
 
+// ── Magic-link login ───────────────────────────────────────────────────────
+
+/**
+ * Request a magic sign-in link. Returns whether the email was actually sent,
+ * whether it's a new account, and (only in degraded mode, when no email
+ * provider is configured) a `devToken` the caller can use to finish sign-in
+ * directly — keeping the app usable before RESEND_API_KEY is set.
+ */
+export async function requestMagicLink(email: string): Promise<{
+  ok: boolean;
+  sent: boolean;
+  isNew: boolean;
+  devToken?: string;
+  error?: string;
+}> {
+  try {
+    const { requestMagicLink: dbRequest } = await import("~/db/queries");
+    const result = await dbRequest({ data: { email: email.toLowerCase().trim() } });
+    if (!result.ok) {
+      return { ok: false, sent: false, isNew: false, error: result.error };
+    }
+    return {
+      ok: true,
+      sent: result.sent,
+      isNew: result.isNew,
+      devToken: "devToken" in result ? result.devToken : undefined,
+    };
+  } catch {
+    return {
+      ok: false,
+      sent: false,
+      isNew: false,
+      error: "Something went wrong. Please try again.",
+    };
+  }
+}
+
+/**
+ * Complete a magic-link sign-in from a token. On success, stores the session
+ * token + premium cache and hydrates the child locally, then returns where to
+ * go next.
+ */
+export async function verifyMagicLink(token: string): Promise<{
+  ok: boolean;
+  hasChild: boolean;
+  reason?: string;
+}> {
+  try {
+    const { verifyMagicLink: dbVerify } = await import("~/db/queries");
+    const result = await dbVerify({ data: { token } });
+    if (!result.ok) {
+      return { ok: false, hasChild: false, reason: result.reason };
+    }
+
+    setSession(result.sessionToken);
+    lsSet(PREMIUM_KEY, String(result.isPremium));
+
+    if (result.childId && result.childName) {
+      setChildId(result.childId);
+      setActiveChildId(result.childId);
+      try {
+        const { getWords: dbGetWords } = await import("~/db/queries");
+        const dbWords = await dbGetWords({ data: { childId: result.childId } });
+        saveChild({
+          name: result.childName,
+          birthDate: result.childBirthDate ?? "",
+          words: dbWords ?? [],
+        });
+      } catch {
+        saveChild({
+          name: result.childName,
+          birthDate: result.childBirthDate ?? "",
+          words: [],
+        });
+      }
+    }
+
+    return { ok: true, hasChild: Boolean(result.childId) };
+  } catch {
+    return { ok: false, hasChild: false, reason: "error" };
+  }
+}
+
 // ── Setup / restore account ────────────────────────────────────────────────
 
 /**
