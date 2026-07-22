@@ -252,14 +252,21 @@ function magicLinkEmailHtml(link: string, isNew: boolean): string {
     </div></body></html>`;
 }
 
-/** Send an email via Resend. Returns false when not configured or on failure. */
+type EmailResult =
+  | { sent: true }
+  | { sent: false; reason: "no_key" }
+  | { sent: false; reason: "api_error"; error: string };
+
+/** Send an email via Resend. Returns a discriminated union so callers can
+ * distinguish "not configured" (valid degraded mode) from "configured but
+ * failed" (a real error that must be surfaced to the user). */
 async function sendEmailViaResend(
   to: string,
   subject: string,
   html: string,
-): Promise<boolean> {
+): Promise<EmailResult> {
   const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) return false;
+  if (!apiKey) return { sent: false, reason: "no_key" };
   const from = process.env.EMAIL_FROM ?? "WordBloom <onboarding@resend.dev>";
   try {
     const res = await fetch("https://api.resend.com/emails", {
@@ -271,13 +278,14 @@ async function sendEmailViaResend(
       body: JSON.stringify({ from, to, subject, html }),
     });
     if (!res.ok) {
-      console.error("Resend send failed:", res.status, await res.text());
-      return false;
+      const body = await res.text();
+      console.error("Resend send failed:", res.status, body);
+      return { sent: false, reason: "api_error", error: `Resend returned ${res.status}` };
     }
-    return true;
+    return { sent: true };
   } catch (e) {
     console.error("Resend send error:", e);
-    return false;
+    return { sent: false, reason: "api_error", error: String(e) };
   }
 }
 
@@ -316,18 +324,25 @@ export const requestMagicLink = createServerFn({ method: "POST" })
       `;
 
       const link = `${siteBaseUrl()}/auth/verify?token=${token}`;
-      const sent = await sendEmailViaResend(
+      const emailResult = await sendEmailViaResend(
         email,
         isNew ? "Confirm your WordBloom account 🌱" : "Your WordBloom sign-in link 🌱",
         magicLinkEmailHtml(link, isNew),
       );
 
-      // Degraded mode: no email provider configured — hand the token back so
-      // the client can finish (equivalent to the old email-as-identity flow).
-      if (!sent) {
+      if (emailResult.sent) {
+        return { ok: true as const, sent: true, isNew };
+      }
+
+      if (emailResult.reason === "no_key") {
+        // Degraded mode: no email provider configured — hand the token back so
+        // the client can finish (equivalent to the old email-as-identity flow).
         return { ok: true as const, sent: false, isNew, devToken: token };
       }
-      return { ok: true as const, sent: true, isNew };
+
+      // api_error: the provider is configured but the send failed — surface
+      // the error; do NOT return a devToken that would bypass email verification.
+      return { ok: false as const, error: `Failed to send email: ${emailResult.error}` };
     } catch (e) {
       console.error("requestMagicLink failed:", e);
       return { ok: false as const, error: "Something went wrong. Please try again." };
