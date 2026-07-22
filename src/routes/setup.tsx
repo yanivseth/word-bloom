@@ -257,7 +257,7 @@ function Setup() {
 
     const res = await requestMagicLink(trimmed);
     if (!res.ok) {
-      setLinkError(res.error ?? "Couldn't send the link. Please try again.");
+      setLinkError(res.error ?? "We couldn't send the email. Please try again.");
       return false;
     }
     if (res.sent) {
@@ -270,7 +270,7 @@ function Setup() {
       navigate({ to: "/auth/verify", search: { token: res.devToken } });
       return true;
     }
-    setLinkError("Couldn't send the link. Please try again.");
+    setLinkError("We couldn't send the email. Please try again.");
     return false;
   };
 
