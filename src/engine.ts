@@ -625,7 +625,7 @@ export function generatePhrases(
   for (const { childWord, entry } of allMatches) {
     if (usedEntries.has(entry.word)) continue;
     const isExact = knownSet.has(entry.word);
-    const phrases = pickPhrasesForEntry(entry, childWord, contextHint, 3, rng);
+    const phrases = pickPhrasesForEntry(entry, childWord, contextHint, 3, rng, isExact);
     for (const p of phrases) {
       results.push({ phrase: p, score: (isExact ? 4 : 3) + contextBonus(entry) });
     }
@@ -721,6 +721,8 @@ function pickPhrasesForEntry(
   contextHint: string | undefined,
   maxCount: number,
   rng: () => number,
+  /** True when the child already says entry.word (reinforce, don't call it new) */
+  entryIsKnown = false,
 ): Phrase[] {
   const phrases: Phrase[] = [];
   const usedTexts = new Set<string>();
@@ -749,17 +751,31 @@ function pickPhrasesForEntry(
         ? pickRandom(CONTEXT_SPECIFIC_PHRASES[context], rng)
         : CATEGORY_CONTEXTS[entry.category] || "Anytime";
 
-    const isDirectlyKnown = basedOnWord !== entry.word;
-    const tip = isDirectlyKnown
-      ? `Building on "${basedOnWord}" — model this phrase naturally during ${context}.`
-      : `New word "${entry.word}" — say it slowly and clearly during ${context}.`;
+    // Three distinct cases — the old code conflated the last two:
+    //  • scaffold: basedOnWord is a sound/approximation → introduce entry.word
+    //  • reinforce: the child already says entry.word → use it in richer sentences
+    //  • introduce: entry.word is a brand-new age-appropriate target
+    const isScaffold = basedOnWord !== entry.word;
+    let tip: string;
+    let newWord: string | undefined;
+    if (isScaffold) {
+      tip = `Building on "${basedOnWord}" — model this phrase naturally during ${context}.`;
+      newWord = entry.word;
+    } else if (entryIsKnown) {
+      tip = `Reinforcing "${entry.word}" — a word your child already says. Keep using it in new sentences during ${context}.`;
+      newWord = undefined;
+    } else {
+      tip = `New word "${entry.word}" — say it slowly and clearly during ${context}.`;
+      newWord = undefined;
+    }
 
     phrases.push({
       id: `p-${++phraseCounter}`,
       text: template,
       context: ctxText,
       basedOnWord,
-      newWord: isDirectlyKnown ? entry.word : undefined,
+      newWord,
+      targetWord: isScaffold ? entry.word : undefined,
       tip,
     });
   }
