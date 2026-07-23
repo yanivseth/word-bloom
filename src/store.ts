@@ -8,6 +8,7 @@ const CHILD_ID_KEY = "wordbloom_childId";
 const ACTIVE_CHILD_ID_KEY = "wordbloom_activeChildId";
 const PREMIUM_KEY = "wordbloom_premium";
 const SESSION_KEY = "wordbloom_session";
+const SETUP_DRAFT_KEY = "wordbloom_setup_draft";
 
 // ── localStorage helpers ───────────────────────────────────────────────────
 
@@ -77,6 +78,38 @@ export async function getAccount(): Promise<{
   } catch {
     return null;
   }
+}
+
+// ── Setup draft (try-it preview → signup handoff) ──────────────────────────
+
+/**
+ * A pre-signup draft captured from the landing "try it" preview, carried into
+ * /setup so the parent doesn't re-enter what they just typed. Stored separately
+ * from the real child record (CHILD_KEY) so it never trips hasChildProfile().
+ */
+export interface SetupDraft {
+  birthDate: string;
+  words: string[];
+}
+
+export function saveSetupDraft(draft: SetupDraft): void {
+  lsSet(SETUP_DRAFT_KEY, JSON.stringify(draft));
+}
+
+export function getSetupDraft(): SetupDraft | null {
+  const raw = lsGet(SETUP_DRAFT_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as SetupDraft;
+    if (typeof parsed?.birthDate !== "string") return null;
+    return { birthDate: parsed.birthDate, words: parsed.words ?? [] };
+  } catch {
+    return null;
+  }
+}
+
+export function clearSetupDraft(): void {
+  lsRemove(SETUP_DRAFT_KEY);
 }
 
 // ── Magic-link login ───────────────────────────────────────────────────────

@@ -1,8 +1,12 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { readFile } from "node:fs/promises";
-import { useState, useEffect } from "react";
-import { hasChildProfile } from "~/store";
+import { useState, useEffect, useMemo, type FormEvent } from "react";
+import { hasChildProfile, saveSetupDraft } from "~/store";
+import { generatePhrases } from "~/engine";
+import { ageInMonths } from "~/utils";
+import { PhraseCard } from "~/components/PhraseCard";
+import type { Phrase } from "~/types";
 
 const getBusinessName = createServerFn({ method: "GET" }).handler(async () => {
   try {
@@ -31,8 +35,6 @@ function Home() {
     setHasProfile(hasChildProfile());
   }, []);
 
-  const ctaLink = hasProfile ? "/dashboard" : "/setup";
-
   return (
     <main className="flex flex-1 flex-col">
       {/* Hero */}
@@ -41,40 +43,40 @@ function Home() {
         <div className="mb-6 text-5xl">🌱</div>
 
         <h1 className="max-w-md text-4xl font-bold leading-tight tracking-tight text-sage-800 sm:text-5xl">
-          Grow your child&rsquo;s vocabulary, one word at a time
+          Never wonder what to say to your baby again
         </h1>
 
         <p className="mt-5 max-w-sm text-lg leading-relaxed text-gray-600">
-          {businessName} gives you daily, personalized phrases to say to your
-          baby or toddler — each one building on the words they already know.
+          Other apps track what your child says. {businessName} tells you the
+          exact phrase to say next — built on the words they already know. No
+          scripts to memorize, no guessing.
         </p>
 
-        <Link
-          to={ctaLink}
-          className="mt-8 inline-flex items-center gap-2 rounded-full bg-lavender-500 px-8 py-3.5 text-lg font-semibold text-white shadow-md transition-all hover:bg-lavender-600 hover:shadow-lg active:scale-95 min-h-[44px]"
-        >
-          {hasProfile ? "Go to Dashboard" : "Get Started"}
-          <span aria-hidden="true">→</span>
-        </Link>
+        {hasProfile ? (
+          <Link
+            to="/dashboard"
+            className="mt-8 inline-flex items-center gap-2 rounded-full bg-lavender-500 px-8 py-3.5 text-lg font-semibold text-white shadow-md transition-all hover:bg-lavender-600 hover:shadow-lg active:scale-95 min-h-[44px]"
+          >
+            Go to Dashboard
+            <span aria-hidden="true">→</span>
+          </Link>
+        ) : (
+          <TryItPreview />
+        )}
       </section>
 
-      {/* Features */}
+      {/* Features — lead with the one thing that's better than everything else */}
       <section className="bg-white px-6 py-16">
         <div className="mx-auto max-w-md space-y-10">
           <FeatureCard
-            emoji="📝"
-            title="Log what they say"
-            description="Track every sound, babble, and word. Watch their vocabulary grow day by day."
-          />
-          <FeatureCard
             emoji="💬"
-            title="Get daily phrases"
-            description="Receive playful, research-backed phrases that build on what your child can already say."
+            title="Know exactly what to say"
+            description="Open the app and get the exact phrase to say right now — built on the words your child already says. The hardest part of helping them talk, done for you."
           />
           <FeatureCard
             emoji="🎉"
             title="Tap “Said it!” when it happens"
-            description="The moment your child says a suggested word, one tap logs it — and tomorrow's phrases build on it."
+            description="The moment your child says a suggested word, one tap logs it — you feel the win, and tomorrow's phrases build on it."
           />
           <FeatureCard
             emoji="🌸"
@@ -87,9 +89,13 @@ function Home() {
       {/* Backed by research */}
       <section className="border-t border-cream-200 bg-cream-50 px-6 py-16">
         <div className="mx-auto max-w-2xl">
-          <h2 className="mb-10 text-center text-2xl font-bold tracking-tight text-sage-700 sm:text-3xl">
-            Backed by speech‑language research
+          <h2 className="mb-3 text-center text-2xl font-bold tracking-tight text-sage-700 sm:text-3xl">
+            How the phrases know what to say
           </h2>
+          <p className="mx-auto mb-10 max-w-md text-center text-gray-600">
+            Under the hood, every suggestion is grounded in speech-language
+            research — so &ldquo;what to say next&rdquo; is never a guess.
+          </p>
 
           <div className="grid grid-cols-1 gap-8 md:grid-cols-3">
             <ResearchCard
@@ -134,6 +140,115 @@ function Home() {
         </div>
       </section>
     </main>
+  );
+}
+
+/**
+ * Instant-aha onboarding: let a parent see a real, personalized phrase for
+ * their own child *before* signing up. Runs entirely on the client using the
+ * same engine the dashboard uses — no account, no backend. "Save" hands the
+ * entered age + words to /setup via a draft so nothing is retyped.
+ */
+function TryItPreview() {
+  const navigate = useNavigate();
+
+  // Default to ~12 months old — the meat of the target range.
+  const defaultBirth = useMemo(() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() - 12);
+    return d.toISOString().split("T")[0];
+  }, []);
+  const maxBirth = useMemo(() => new Date().toISOString().split("T")[0], []);
+  const minBirth = useMemo(() => {
+    const d = new Date();
+    d.setFullYear(d.getFullYear() - 4);
+    return d.toISOString().split("T")[0];
+  }, []);
+
+  const [birthDate, setBirthDate] = useState(defaultBirth);
+  const [words, setWords] = useState("");
+  const [phrase, setPhrase] = useState<Phrase | null>(null);
+
+  const parseWords = (raw: string): string[] =>
+    raw
+      .split(",")
+      .map((w) => w.trim())
+      .filter((w) => w.length > 0);
+
+  const handleTry = (e: FormEvent) => {
+    e.preventDefault();
+    const wordList = parseWords(words);
+    const ageMonths = ageInMonths(birthDate);
+    const result = generatePhrases(wordList, ageMonths, {
+      count: 1,
+      seed: `try:${birthDate}:${wordList.join(",")}`,
+    });
+    setPhrase(result[0] ?? null);
+  };
+
+  const handleSave = () => {
+    saveSetupDraft({ birthDate, words: parseWords(words) });
+    navigate({ to: "/setup" });
+  };
+
+  return (
+    <div className="mt-8 w-full max-w-sm text-left">
+      <form
+        onSubmit={handleTry}
+        className="rounded-2xl border border-cream-300 bg-white p-5 shadow-sm"
+      >
+        <p className="text-center text-sm font-semibold text-sage-700">
+          See a phrase for your child — free, no signup
+        </p>
+
+        <label className="mt-4 block text-xs font-semibold text-sage-700">
+          Your child&rsquo;s birthday
+        </label>
+        <input
+          type="date"
+          value={birthDate}
+          max={maxBirth}
+          min={minBirth}
+          onChange={(e) => setBirthDate(e.target.value)}
+          className="mt-1 w-full rounded-xl border border-cream-300 bg-cream-50 px-4 py-2.5 text-gray-800 shadow-sm transition-colors focus:border-lavender-400 focus:outline-none focus:ring-2 focus:ring-lavender-200 min-h-[44px]"
+        />
+
+        <label className="mt-3 block text-xs font-semibold text-sage-700">
+          A word or sound they say{" "}
+          <span className="font-normal text-gray-400">(optional)</span>
+        </label>
+        <input
+          type="text"
+          value={words}
+          onChange={(e) => setWords(e.target.value)}
+          placeholder='e.g. "ba", "mama", "woof"'
+          className="mt-1 w-full rounded-xl border border-cream-300 bg-cream-50 px-4 py-2.5 text-gray-800 placeholder-gray-400 shadow-sm transition-colors focus:border-lavender-400 focus:outline-none focus:ring-2 focus:ring-lavender-200 min-h-[44px]"
+          autoComplete="off"
+        />
+
+        <button
+          type="submit"
+          className="mt-4 w-full rounded-full bg-lavender-500 px-6 py-3 font-semibold text-white shadow-md transition-all hover:bg-lavender-600 hover:shadow-lg active:scale-95 min-h-[44px]"
+        >
+          {phrase ? "Show me another →" : "Show me a phrase →"}
+        </button>
+      </form>
+
+      {phrase && (
+        <div className="mt-4 animate-fade-in">
+          <PhraseCard phrase={phrase} />
+          <button
+            onClick={handleSave}
+            className="mt-3 w-full rounded-full bg-sage-500 px-6 py-3 font-semibold text-white shadow-md transition-all hover:bg-sage-600 hover:shadow-lg active:scale-95 min-h-[44px]"
+          >
+            Save this &amp; get a new one every day →
+          </button>
+          <p className="mt-2 text-center text-xs text-gray-400">
+            Takes 20 seconds. No credit card.
+          </p>
+        </div>
+      )}
+    </div>
   );
 }
 

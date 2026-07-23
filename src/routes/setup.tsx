@@ -13,6 +13,8 @@ import {
   getChildCount,
   setActiveChildId,
   requestMagicLink,
+  getSetupDraft,
+  clearSetupDraft,
 } from "~/store";
 import type { Child } from "~/types";
 
@@ -73,6 +75,9 @@ function Spinner() {
 function Setup() {
   const navigate = useNavigate();
   const existingChild = typeof window !== "undefined" ? getChild() : null;
+  // Draft handed over from the landing "try it" preview (new signups only).
+  const setupDraft =
+    typeof window !== "undefined" && !existingChild ? getSetupDraft() : null;
 
   // Check for query params
   const searchParams =
@@ -109,11 +114,16 @@ function Setup() {
       const stored = new Date(existingChild.birthDate);
       return toDateString(clampDate(stored, fourYearsAgo, today));
     }
+    if (setupDraft?.birthDate) {
+      return toDateString(
+        clampDate(new Date(setupDraft.birthDate), fourYearsAgo, today),
+      );
+    }
     return defaultDate;
   });
   const [name, setName] = useState(existingChild?.name ?? "");
   const [initialWords, setInitialWords] = useState(
-    existingChild?.words?.join(", ") ?? "",
+    existingChild?.words?.join(", ") ?? setupDraft?.words?.join(", ") ?? "",
   );
   const [submitting, setSubmitting] = useState(false);
 
@@ -212,6 +222,12 @@ function Setup() {
       emailRef.current.focus();
     }
   }, [isRestoreMode]);
+
+  // The try-it draft has been read into initial state — clear it so it doesn't
+  // resurface on a later visit.
+  useEffect(() => {
+    clearSetupDraft();
+  }, []);
 
   // Check if email belongs to an existing account (debounced onBlur)
   const handleEmailBlur = () => {
