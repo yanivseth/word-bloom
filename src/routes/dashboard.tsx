@@ -1022,10 +1022,13 @@ function DashboardContent() {
             <WordListSkeleton />
           ) : words.length === 0 ? (
             <div className="rounded-xl border-2 border-dashed border-cream-300 bg-cream-50 p-8 text-center animate-fade-in">
-              <p className="text-lg mb-1">✨</p>
-              <p className="text-gray-600 font-medium">No words logged yet</p>
+              <p className="text-lg mb-1">🌱</p>
+              <p className="text-gray-600 font-medium">
+                Your first phrase is ready above
+              </p>
               <p className="mt-1 text-sm text-gray-400">
-                Add your child&rsquo;s first word below!
+                Try it with {displayName} today — then tap &ldquo;Said it!&rdquo;
+                or add a first word below to watch the garden grow.
               </p>
             </div>
           ) : (
