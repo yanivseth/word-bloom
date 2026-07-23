@@ -199,6 +199,18 @@ const CATEGORY_CONTEXTS: Record<string, string> = {
   descriptor: "Anytime",
 };
 
+/** Each lexicon category's single most natural routine/context. */
+const CATEGORY_TO_CONTEXT: Record<string, string> = {
+  food: "mealtime",
+  action: "playtime",
+  animal: "playtime",
+  body: "bathtime",
+  people: "playtime",
+  social: "playtime",
+  toy: "playtime",
+  descriptor: "playtime",
+};
+
 const CONTEXT_SPECIFIC_PHRASES: Record<string, string[]> = {
   mealtime: [
     "At mealtime",
@@ -593,11 +605,18 @@ export function generatePhrases(
   // ── Step 3: Expand to next-step words ──────────────────
   const expansions = findExpansions(matchedEntries, childWords, ageMonths);
 
-  // Context bonus: entries whose natural context matches the hint float up
+  // A "hard" context is one the parent explicitly picked (chip), vs. a "soft"
+  // time-of-day nudge. Hard context should genuinely reshape what's shown;
+  // soft should only gently reorder.
+  const hardContext = Boolean(contextHint) && !opts.contextIsSoft;
+  const requestedCtx = contextHint ? normalizeContextHint(contextHint) : null;
+
+  // Context bonus: entries whose natural context matches the hint float up —
+  // strongly for a hard pick, gently for a soft time-of-day nudge.
   const contextBonus = (entry: LexiconEntry): number => {
-    if (!contextHint) return 0;
-    const hinted = CONTEXT_KEYWORDS[contextHint.toLowerCase().trim()] ?? contextHint.toLowerCase().trim();
-    return resolveContext(entry) === hinted ? 0.5 : 0;
+    if (!requestedCtx) return 0;
+    if (naturalContext(entry) !== requestedCtx) return 0;
+    return hardContext ? 2 : 0.5;
   };
 
   const knownSet = new Set(childWords.map((w) => w.toLowerCase().trim()));
@@ -645,6 +664,29 @@ export function generatePhrases(
     usedEntries.add(entry.word);
   }
 
+  // ── Step 6.5: dedicated context-fit words (hard context only) ──
+  // When the parent explicitly picks a moment (e.g. "Meals"), make sure the set
+  // is actually about that moment — introduce in-context words even if the
+  // child's known words don't happen to include that category. Scored 5 so
+  // genuine context phrases lead, but below reinforced known in-context words
+  // (score 4 + 2 = 6).
+  if (hardContext && requestedCtx) {
+    let added = 0;
+    for (const entry of LEXICON) {
+      if (added >= count + 2) break;
+      if (usedEntries.has(entry.word)) continue;
+      if (naturalContext(entry) !== requestedCtx) continue;
+      if (entry.ageMonths > ageMonths + 6) continue; // within developmental reach
+      const known = knownSet.has(entry.word);
+      const phrases = pickPhrasesForEntry(entry, entry.word, contextHint, 1, rng, known);
+      for (const p of phrases) {
+        results.push({ phrase: p, score: 5 });
+      }
+      usedEntries.add(entry.word);
+      added++;
+    }
+  }
+
   // From age-appropriate new words (score 1)
   const tier = ageToTier(ageMonths);
   for (const entry of LEXICON) {
@@ -669,19 +711,31 @@ export function generatePhrases(
   }
 
   const final: Phrase[] = [];
-  for (const [, band] of [...bands.entries()].sort((a, b) => b[0] - a[0])) {
-    for (const s of shuffle(band, rng)) {
-      if (final.length >= count) break;
-      // Avoid duplicates and more than one phrase per base word
-      if (
-        !final.some(
-          (f) => f.text === s.phrase.text || (f.newWord && f.newWord === s.phrase.newWord),
-        )
-      ) {
-        final.push(s.phrase);
-      }
-    }
+  const usedBase = new Set<string>();
+  const orderedBands = [...bands.entries()].sort((a, b) => b[0] - a[0]);
+
+  const tryAdd = (p: Phrase, enforceVariety: boolean): void => {
+    if (final.length >= count) return;
+    if (final.some((f) => f.text === p.text)) return; // never duplicate text
+    const base = (p.basedOnWord ?? "").toLowerCase().trim();
+    // Variety: don't fill the set with several phrases about the same word
+    // (e.g. three "milk" cards) unless we have to.
+    if (enforceVariety && base && usedBase.has(base)) return;
+    final.push(p);
+    if (base) usedBase.add(base);
+  };
+
+  // Pass 1 (high → low score): at most one phrase per base word.
+  for (const [, band] of orderedBands) {
+    for (const s of shuffle(band, rng)) tryAdd(s.phrase, true);
     if (final.length >= count) break;
+  }
+  // Pass 2: if still short, allow repeated base words to fill the count.
+  if (final.length < count) {
+    for (const [, band] of orderedBands) {
+      for (const s of shuffle(band, rng)) tryAdd(s.phrase, false);
+      if (final.length >= count) break;
+    }
   }
 
   // If we still don't have enough, fill from cold start
@@ -715,6 +769,23 @@ function templateMatchesContext(template: string, context: string): boolean {
   return keywords.some((k) => lower.includes(k));
 }
 
+/**
+ * Does this specific phrase genuinely belong to `ctx`? True when the entry's
+ * category is naturally that context (food→mealtime) OR the template's words
+ * mention it (e.g. "splash" → bathtime). This is what keeps us from stamping
+ * "At mealtime" on "Dada's home!".
+ */
+function phraseFitsContext(
+  entry: LexiconEntry,
+  template: string,
+  ctx: string,
+): boolean {
+  return (
+    CATEGORY_TO_CONTEXT[entry.category] === ctx ||
+    templateMatchesContext(template, ctx)
+  );
+}
+
 function pickPhrasesForEntry(
   entry: LexiconEntry,
   basedOnWord: string,
@@ -729,12 +800,12 @@ function pickPhrasesForEntry(
 
   // When a context is requested, put templates whose TEXT actually fits that
   // context first — so "bath time phrases" are about baths, not just labeled so.
-  const resolvedHint = contextHint ? resolveContext(entry, contextHint) : null;
-  const orderedTemplates = resolvedHint
+  const requestedCtx = contextHint ? normalizeContextHint(contextHint) : null;
+  const orderedTemplates = requestedCtx
     ? [...entry.phrases].sort(
         (a, b) =>
-          Number(templateMatchesContext(b, resolvedHint)) -
-          Number(templateMatchesContext(a, resolvedHint)),
+          Number(templateMatchesContext(b, requestedCtx)) -
+          Number(templateMatchesContext(a, requestedCtx)),
       )
     : entry.phrases;
 
@@ -743,12 +814,18 @@ function pickPhrasesForEntry(
     if (usedTexts.has(template)) continue;
     usedTexts.add(template);
 
-    const context = resolveContext(entry, contextHint);
+    // Only claim the requested context when the phrase GENUINELY fits it —
+    // otherwise fall back to the entry's honest natural context. This is what
+    // stops "Dada's home!" from being labeled "At mealtime".
+    const fitsRequested = requestedCtx
+      ? phraseFitsContext(entry, template, requestedCtx)
+      : false;
+    const effectiveCtx = fitsRequested ? requestedCtx! : naturalContext(entry);
 
-    // Determine context text
+    // Determine context label text
     const ctxText =
-      contextHint && CONTEXT_SPECIFIC_PHRASES[context]
-        ? pickRandom(CONTEXT_SPECIFIC_PHRASES[context], rng)
+      fitsRequested && CONTEXT_SPECIFIC_PHRASES[requestedCtx!]
+        ? pickRandom(CONTEXT_SPECIFIC_PHRASES[requestedCtx!], rng)
         : CATEGORY_CONTEXTS[entry.category] || "Anytime";
 
     // Three distinct cases — the old code conflated the last two:
@@ -759,13 +836,13 @@ function pickPhrasesForEntry(
     let tip: string;
     let newWord: string | undefined;
     if (isScaffold) {
-      tip = `Building on "${basedOnWord}" — model this phrase naturally during ${context}.`;
+      tip = `Building on "${basedOnWord}" — model this phrase naturally during ${effectiveCtx}.`;
       newWord = entry.word;
     } else if (entryIsKnown) {
-      tip = `Reinforcing "${entry.word}" — a word your child already says. Keep using it in new sentences during ${context}.`;
+      tip = `Reinforcing "${entry.word}" — a word your child already says. Keep using it in new sentences during ${effectiveCtx}.`;
       newWord = undefined;
     } else {
-      tip = `New word "${entry.word}" — say it slowly and clearly during ${context}.`;
+      tip = `New word "${entry.word}" — say it slowly and clearly during ${effectiveCtx}.`;
       newWord = undefined;
     }
 
@@ -782,23 +859,15 @@ function pickPhrasesForEntry(
   return phrases;
 }
 
-function resolveContext(entry: LexiconEntry, contextHint?: string): string {
-  if (contextHint) {
-    const mapped = CONTEXT_KEYWORDS[contextHint.toLowerCase().trim()] || contextHint.toLowerCase().trim();
-    return mapped;
-  }
-  // Map category to context
-  const catMap: Record<string, string> = {
-    food: "mealtime",
-    action: "playtime",
-    animal: "playtime",
-    body: "bathtime",
-    people: "playtime",
-    social: "playtime",
-    toy: "playtime",
-    descriptor: "playtime",
-  };
-  return catMap[entry.category] || "playtime";
+/** The requested context from a hint, normalized to a canonical context key. */
+function normalizeContextHint(contextHint: string): string {
+  const raw = contextHint.toLowerCase().trim();
+  return CONTEXT_KEYWORDS[raw] ?? raw;
+}
+
+/** An entry's natural context when no hint is given. */
+function naturalContext(entry: LexiconEntry): string {
+  return CATEGORY_TO_CONTEXT[entry.category] ?? "playtime";
 }
 
 function findClosestKnownCV(
